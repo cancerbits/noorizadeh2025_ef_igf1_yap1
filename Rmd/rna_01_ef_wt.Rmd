@@ -1,0 +1,241 @@
+---
+title: 'EF vs WT' 
+author: 'Rahil Noorizadeh & Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+library(org.Mm.eg.db)
+library(biomaRt)
+library(RColorBrewer)
+library(pheatmap)
+library(EnhancedVolcano)
+library(ComplexHeatmap)
+
+P_THRESH <- 0.05
+LFC_THRESH <- log2(2)
+```
+
+# Load data
+
+
+```{r}
+m <- read.csv("metadata/samples_nf_rna.csv", row.names=1)
+rownames(m) <- paste0("X", rownames(m))
+```
+
+```{r}
+d <- read.csv(resultsDir("pipeline/nf-core/rna/star_rsem/rsem.merged.gene_counts.tsv"), row.names=1, sep="\t")[,-1]
+rownames(d) <- gsub("\\.\\d+$", "", rownames(d)) # remove version suffix
+head(d)
+```
+
+```{r}
+m_selected <- m[m$condition%in%c("EFPrx1MSCLC", "MSC"),]
+print(m_selected)
+d <- d[,rownames(m_selected)] 
+print(head(d))
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData=data.matrix(round(d)), colData=m_selected, design=~condition)
+dds <- DESeq(dds)
+```
+
+```{R}
+vst_nhbe <- assay(varianceStabilizingTransformation(dds))
+print(head(vst_nhbe))
+```
+
+
+
+
+# Figure S3
+
+```{r}
+res <- results(dds, contrast = c("condition","EFPrx1MSCLC","MSC"))
+res$genename <- mapIds(org.Mm.eg.db,
+                        keys=rownames(res), 
+                        column="SYMBOL",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+res$ensgene <- rownames(res)
+
+print(summary(res, P_THRESH))
+print(sum(complete.cases(res)))
+print(head(res))
+
+print(plotMA(res))
+```
+
+```{r}
+filter_res <- res[!is.na(res$padj) & res$padj<=P_THRESH & abs(res$log2FoldChange)>=LFC_THRESH,]
+filter_res <- filter_res[ order( filter_res$log2FoldChange), ]
+print(head(filter_res))
+```
+
+
+
+# Figure S3B
+
+```{r, fig.width=6, fig.height=3}
+selected_genes <- c("Bcl6b", "Bcl2a1c", "Bcl2a1b", "Bcl2a1d", "Bcl2a1a")
+i <- res$genename%in%selected_genes
+
+tcounts <- t(vst_nhbe[i,]) %>%
+  merge(colData(dds), ., by="row.names") %>%
+  gather(gene, expression, (ncol(.)-length(selected_genes)+1):ncol(.))
+
+gs <- unique(res[,c("ensgene", "genename")])
+tcounts$gene_symbol <- with(gs, structure(genename, names=ensgene))[tcounts$gene]
+
+
+fwrite(tcounts[, c("gene", "gene_symbol", "condition", "sample_label", "expression")], resultsDir("fig_bcl_data.csv.gz"))
+
+
+p <- ggplot(tcounts, aes(x=factor(condition, levels=c("MSC", "EFPrx1MSCLC")), y=expression)) +
+  geom_dotplot(binaxis = "y", stackdir = "center") +
+  stat_summary(aes(color=condition), geom="errorbar", fun.max=mean, fun.min=mean) +
+  facet_wrap(~gene_symbol, scales="free_y", nrow=1) +
+  labs(y="Normalized expression (VST)")
+
+ggsave2(plot=p, resultsDir("fig_bcl.pdf"), width=12, height=6, units="cm", dpi=600)
+
+print(p)
+```
+
+
+# Figure S3A
+
+```{r, fig.width=4, fig.height=6}
+print(as.data.table(filter_res)[,.N,by=sign(log2FoldChange)])
+
+p <- EnhancedVolcano(res,
+    lab = res$genename, title = "ef vs wt", subtitle = NULL,
+    x = 'log2FoldChange', FCcutoff = LFC_THRESH,
+    y = 'padj', pCutoff = P_THRESH, ylab = bquote(~-Log[10] ~ FDR),
+    raster = TRUE)
+
+ggsave2(plot=p, resultsDir("fig_volcano_ef_wt.pdf"), width=10, height=14, units="cm", dpi=600)
+
+fwrite(as.data.table(res), resultsDir("fig_volcano_ef_wt_data.csv.gz"))
+
+print(p)
+```
+
+
+# Figure S3C
+
+Get gene sets from MSigDB. 
+```{r}
+msig <- msigdbr::msigdbr(category="C2", subcategory="CGP") #KINSEY_TARGETS_OF_EWSR1_FLI1_FUSION_UP
+msig <- split(msig$gene_symbol, msig$gs_name)
+head(sapply(msig, length))
+```
+Define "universe" as all genes annotated with at least one term and which can be matched to genes in our RNA-seq data by a simple string match.
+
+```{r}
+univ <- intersect(as.character(unlist(msig)), toupper(na.omit(res$genename)))
+head(univ)
+```
+
+Keep only signature genes in universe:
+
+```{r}
+msig <- sapply(msig, intersect, univ, simplify=FALSE) # only keep genes in univ
+head(sapply(msig, length))
+```
+
+```{r, fig.height=4, fig.width=4}
+sel_signatures <- c("KINSEY_TARGETS_OF_EWSR1_FLII_FUSION_UP", "RIGGI_EWING_SARCOMA_PROGENITOR_UP")
+gene_sets <- c(msig[sel_signatures], list(UP=intersect(unique(na.omit(as.data.table(filter_res)[log2FoldChange>0, toupper(genename)])), univ)))
+names(gene_sets) <- sub("_", "\n", names(gene_sets))
+p <- ggvenn::ggvenn(gene_sets, text_size=4, show_percentage=FALSE, set_name_size=4)
+ggsave2(plot=p, resultsDir("fig_venn_ef_wt.pdf"), width=10, height=10, units="cm", dpi=600)
+print(p)
+
+
+fwrite(rbindlist(lapply(gene_sets, function(x) data.table(gene_symbol=x)), idcol="gene_set"), resultsDir("fig_venn_ef_wt_data.csv.gz"))
+```
+
+```{r}
+hyper_res <- canceRbits::cb_hyper(gene_sets$UP, univ, msig, max_size=1250)
+print(head(hyper_res %>% filter(fdr<=0.05) %>% arrange(pval), n=30))
+print(hyper_res[sel_signatures, ])
+
+fwrite(hyper_res, resultsDir("hyper_res_rna_ef_wt.csv.gz"))
+```
+
+
+
+# Figure S3D 
+
+```{r, fig.width=6, fig.height=12}
+myheatcolors2 <- colorRampPalette(colors=c("red","white","blue"))(100)
+
+selected_genes <- str_to_sentence(unique(c(intersect(gene_sets$UP, gene_sets$`KINSEY
+TARGETS_OF_EWSR1_FLII_FUSION_UP`), intersect(gene_sets$UP, gene_sets$`RIGGI
+EWING_SARCOMA_PROGENITOR_UP`)))) 
+
+data_for_hm <- vst_nhbe[filter_res$ensgene,]
+rownames(data_for_hm) <- filter_res$genename
+i <- str_to_sentence(rownames(data_for_hm))%in%selected_genes
+
+p <- ComplexHeatmap::pheatmap(data_for_hm[i,], fontsize_row=9, scale='row', cutree_cols=2, annotation_col=as.data.frame(colData(dds)[("condition")]), color=myheatcolors2)
+ComplexHeatmap::draw(p)
+
+
+fwrite(round(data_for_hm[i,],4), resultsDir("fig_hm_ef_wt_select_data.csv.gz"))
+
+pdf(resultsDir("fig_hm_ef_wt_select.pdf"), 5, 17, bg="white", useDingbats=FALSE)
+ComplexHeatmap::draw(p)
+dev.off()
+
+```
+
+
+```{r}
+myheatcolors2 <- colorRampPalette(colors=c("red","white","blue"))(100)
+
+selected_genes <- sexGenes
+
+data_for_hm <- vst_nhbe[res$ensgene,]
+rownames(data_for_hm) <- res$genename
+i <- tolower(rownames(data_for_hm))%in%selected_genes
+p <- ComplexHeatmap::pheatmap(data_for_hm[i,], fontsize_row=9, scale='row', cutree_cols=2)
+ComplexHeatmap::draw(p)
+
+
+
+```
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

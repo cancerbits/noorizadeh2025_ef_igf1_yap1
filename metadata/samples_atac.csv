@@ -1,0 +1,13 @@
+library_pool,sample_name,genotype,features,description,organism,cell_type,sample_group_detail,sample_group,bio_rep,bio_rep_num,read_type,bsf_folder,flowcell,lane,read1,protocol,data_source
+VG15,S_220_1_S55114,EFPrx1-MSCLC,untreated,mesenchymal EF from 220 mouse cells,mouse_refgenie,mesenchymal,EF,EF,m220,3,single,VG15_L3754__BSF_0654_H7YWYBBXY,BSF_0654_H7YWYBBXY,4,BSF,ATAC-seq,BSF
+VG15,S_221_1_S55112,EFPrx1-MSCLC,untreated,mesenchymal EF from 221 mouse cells,mouse_refgenie,mesenchymal,EF,EF,m221,1,single,VG15_L3754__BSF_0654_H7YWYBBXY,BSF_0654_H7YWYBBXY,4,BSF,ATAC-seq,BSF
+VG15,WT_1_1_S55113,MSCLC,untreated,wildtype mouse 1,mouse_refgenie,mesenchymal,Wt,Wt,mWt1,1,single,VG15_L3754__BSF_0654_H7YWYBBXY,BSF_0654_H7YWYBBXY,4,BSF,ATAC-seq,BSF
+VG15,WT_2_1_S55111,MSCLC,untreated,wildtype mouse 2,mouse_refgenie,mesenchymal,Wt,Wt,mWt2,2,single,VG15_L3754__BSF_0654_H7YWYBBXY,BSF_0654_H7YWYBBXY,4,BSF,ATAC-seq,BSF
+MCA01,BM_unt_S92270,MSCLC,untreated,bone marrow  from wildtype mouse cells,mouse_refgenie,mesenchymal,Wt,Wt,mWt,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,BM_IGF1_S92268,MSCLC,IGF-1,bone marrow from wildtype mouse cells treated with IGF1,mouse_refgenie,mesenchymal,Wt_IGF1,Wt_IGF1,mWt,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,S_203_0_S92258,Prx1-MSCLC,untreated,wildtype mesenchymal cells  from 203 mouse,mouse_refgenie,mesenchymal,Prx1Cre,Wt,mPRx1Cre,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,S_220_0_S92269,EFPrx1-MSCLC,untreated,mesenchymal EF from 220 mouse cells,mouse_refgenie,mesenchymal,EF,EF,m220,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,S_221_0_S92260,EFPrx1-MSCLC,untreated,mesenchymal EF from 221 mouse cells,mouse_refgenie,mesenchymal,EF,EF,m221,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,S_220_IGF1_S92259,EFPrx1-MSCLC,IGF-1,mesenchymal EF from 220 mouse cells,mouse_refgenie,mesenchymal,EF_IGF1,EF_IGF1,m220,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,S_221_IGF1_S92267,EFPrx1-MSCLC,IGF-1 ,mesenchymal EF from 221 mouse cells treated with IGF1,mouse_refgenie,mesenchymal,EF_IGF1 ,EF_IGF1 ,m221,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF
+MCA01,S_221_IGF1_xeno_S92264,EFPrx1-MSCLC,IGF-1 ,xenografted mesenchymal EF from 221 mouse cells treated with IGF1,mouse_refgenie,mesenchymal,EF_IGF1_xeno,EF_IGF1_xeno,m221,1,single,MCA01_L4975__BSF_1013_HLY2WBBXY,BSF_1013_HLY2WBBXY,6,BSF,ATAC-seq,BSF

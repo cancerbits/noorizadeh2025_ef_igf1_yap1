@@ -1,0 +1,186 @@
+---
+title: 'Microsatellite repeats' 
+author: 'Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+Load utility scripts, constants, etc. used throughput the project:
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+```{r}
+peaksDt <- fread(resultsDir("d_peaks.csv.gz"))
+dA <- fread(resultsDir("d_meta.csv.gz"))
+darRes <- fread(resultsDir("dds_res.csv.gz"))
+setkey(dA, sample_name)
+setkey(peaksDt, rid)
+
+peaksGr <- dtToGr(peaksDt)
+```
+
+
+
+
+## Microsatellite repeats
+
+microsat sequences: (GGAA)n, (GGAAN)n or (GGAANN)n 
+ --> https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2654724/
+ alternative models use IUPAC code mismatches 
+ --> http://www.bioinformatics.org/sms/iupac.html
+
+
+```{r}
+grSeqs <- as.character(BSgenome::getSeq(BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10, peaksGr))
+peaksDt[,dna_seq:=grSeqs]
+
+for(baseMotif in c(MICROSAT_EF_MOTIF)) {
+  mm <- 0.1
+  
+  minReps <- 3
+  maxReps <- 10
+  maxSpacer <- 3
+  
+  simpleCache(paste_("agrep", baseMotif, digest::digest(peaksDt[,.(chrom,start,end,rid)]), maxReps, maxSpacer, mm), {
+  	tmp <- parallel::mclapply(X=1:maxReps, FUN=function(nReps) {
+  		msgF("agrep %s %d %f", baseMotif, nReps, mm)
+  		
+  		matchFwd <- agrepl(paste0("(",baseMotif,".{0,",maxSpacer,"}){",nReps,",}"), grSeqs, max.distance=mm, fixed=FALSE)
+  		matchRev <- agrepl(paste0("(",as.character(Biostrings::reverseComplement(Biostrings::DNAString(baseMotif))),".{0,",maxSpacer,"}){",nReps,",}"), grSeqs, max.distance=mm, fixed=FALSE)
+  		
+  		return(matchFwd | matchRev)
+  	}, mc.cores=1)
+  	return(tmp)
+  }, assignToVar="tmp")
+  
+  peaksDt[,paste_("agrep", baseMotif, "max", mm) := 0]		
+  for(n in minReps:maxReps) {
+  	colorPalettes[[paste_("agrep", baseMotif, n, mm)]] <- c("TRUE"="black","FALSE"=NA)
+  	peaksDt[,paste_("agrep", baseMotif, n, mm) := tmp[[n]]]	
+  	peaksDt[tmp[[n]], paste_("agrep", baseMotif, "max", mm) := n]	
+  }
+}
+
+print(head(peaksDt[,grepl("rid|agrep_", colnames(peaksDt)), with=FALSE]))
+```
+
+
+
+```{r}
+maxReps <- MICROSAT_REPEATS+2
+baseMotif <- MICROSAT_EF_MOTIF
+
+motifHitSets <- sapply(grep("agrep_[ACTGN]+_\\d+_", colnames(peaksDt), value=T), function(curCol) {
+	peaksDt[get(curCol)==T, rid]
+}, simplify=F)
+
+print(sapply(motifHitSets, length))
+
+# remove where >= 90% of peaks have a hit:
+motifHitSets <- motifHitSets[sapply(motifHitSets, length) <= 1/2 * nrow(peaksDt)]
+names(motifHitSets)
+```
+
+```{r}
+regionRanks <- sapply(split(darRes, f=as.character(darRes$cmp)), function(x) {
+	x <- unique(x[,.(rid, v=get(MICROSAT_RANK_BY))])[order(v),]
+	
+	res <- x[,as.double(v)]
+	names(res) <- x$rid
+	
+	return(res)
+}, simplify=F)
+```
+
+
+remove regions that always have tiny fold changes in all comparisons:
+
+```{r}
+i <- setdiff(names(which(table(unlist(sapply(regionRanks, function(x) {
+	names(x)[which(abs(x) < 0.5)]
+})))==length(regionRanks))), darRes[sig==T, rid])
+regionRanks <- sapply(regionRanks, function(x) x[!names(x)%in%i], simplify=F)
+```
+
+```{r}
+gseaRes <- rblapply(names(regionRanks), function(n) {
+	msg("FGSEA ", n)
+	x <- regionRanks[[n]]
+	simpleCache(paste_("fgsea", MICROSAT_RANK_BY, digest::digest(x), digest::digest(motifHitSets)), {
+		fgseaRes <- fgsea::fgseaSimple(stats=x, pathways = motifHitSets, nperm=1000, nproc=48)	
+		return(fgseaRes)
+	}, assignToVar="fgseaRes")
+	return(fgseaRes)
+}, "rank_list")
+```
+
+```{r}
+gseaRes[, base_motif:=as.factor(gsub(MICROSAT_REGEX,"\\1", pathway))] 
+gseaRes[, n_reps:=factor(as.numeric(gsub(MICROSAT_REGEX,"\\2",pathway)), levels=0:maxReps)]
+gseaRes[, mm:=as.numeric(gsub(MICROSAT_REGEX,"\\3",pathway))]
+print(gseaRes[,.(rank_list, pathway, base_motif, n_reps, mm, padj, NES)][order(-abs(NES)),])
+```
+
+```{r}
+p1 <- ggplot(gseaRes, aes(x=as.factor(mm), y=n_reps, fill=as.numeric(ifelse(padj<=0.05, NES, NA)))) + geom_tile() + cowplot::theme_cowplot() + facet_grid(base_motif~rank_list) + scale_fill_gradient2(guide=F) + xlab("Number of mismatches allowed") + ylab("Number of repeats") + theme(panel.border=element_rect(colour="black", fill=NA), legend.position="bottom", axis.line=element_blank()) 
+p2 <- ggplot(gseaRes[base_motif==baseMotif & mm==MICROSAT_MISMATCHES,], aes(y=rank_list, x=n_reps, fill=as.numeric(ifelse(padj<=0.05, NES, NA)))) + geom_tile() + cowplot::theme_cowplot() + scale_fill_gradient2() + ylab(NULL) + xlab("Number of repeats") + theme(panel.border=element_rect(colour="black", fill=NA), legend.position="bottom", axis.line=element_blank()) + geom_text(aes(label=pToSig(padj, "n.s.")), hjust=0.5, vjust=0.5) + ggtitle(baseMotif)
+p <- patchwork::wrap_plots(p1, p2, ncol=1, heights=c(3,1))
+#gg(p, "microsat_gsea_hm", 7, 7, type="pdf")
+print(p)
+```
+
+
+```{r}
+for(selRanks in names(regionRanks)) {
+	plot.new()
+	pData <- gseaRes[rank_list==selRanks & mm==MICROSAT_MISMATCHES & base_motif==baseMotif, ][order(abs(pval)),]
+	mtfHits <- motifHitSets[pData$pathway]
+	pData[, pathway:=sprintf("n = %d", n_reps)]
+	names(mtfHits) <- pData$pathway
+	p <- fgsea::plotGseaTable(mtfHits, -regionRanks[[selRanks]], pData, colwidths=c(1,3,0.8,1.2,1.2), gseaParam=1, render=F)
+	#grid.draw(p)
+
+	px <- ggplotify::as.ggplot(p) + ggtitle(selRanks)
+	print(px)
+}
+```
+
+
+
+
+
+
+```{r}
+for(n in names(motifHitSets)) fwrite(data.table(rid=motifHitSets[[n]]), file=resultsDir(n, ".csv.gz"))
+fwrite(gseaRes[,.(rank_list, base_motif, n_reps, mm, pval, padj, ES, NES)], file=resultsDir("gsea.csv.gz"))
+```
+
+
+
+
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

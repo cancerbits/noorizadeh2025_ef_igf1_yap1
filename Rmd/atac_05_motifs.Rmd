@@ -1,0 +1,191 @@
+---
+title: 'TF motifs' 
+author: 'Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+Load utility scripts, constants, etc. used throughput the project:
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+```{r}
+peaksDt <- fread(resultsDir("d_peaks.csv.gz"))
+dA <- fread(resultsDir("d_meta.csv.gz"))
+darRes <- fread(resultsDir("dds_res.csv.gz"))
+setkey(dA, sample_name)
+setkey(peaksDt, rid)
+```
+
+```{r}
+MOTIF_ENRICH_PADJ <- 0.005
+MOTIF_ENRICH_ODDS <- log2(2)
+MOTIF_MIN_PERC <- 0.05
+```
+
+# SCAN REGIONS FOR KNOWN MOTIFS ###
+
+
+```{r}
+
+# get motifs from JASPAR database
+mtfSet <- c(
+	TFBSTools::getMatrixSet(JASPAR2022::JASPAR2022, list(all_versions=FALSE, collection="CORE", species=10090)),  #species=10090, 
+	TFBSTools::getMatrixSet(JASPAR2022::JASPAR2022, list(all_versions=FALSE, collection="CORE", species=9606)) # also add human motifs
+)
+nonUniqMtf <- names(which(table(names(mtfSet))>1))
+nonUniqMtf <- mtfSet[nonUniqMtf] 
+mtfSet <- c(mtfSet[!names(mtfSet)%in%names(nonUniqMtf)],nonUniqMtf)
+if(length(unique(names(mtfSet)))!=length(mtfSet)) stop("non-unique motif IDs") 
+
+peaksGr <- dtToGr(peaksDt)
+
+# look for motifs in all peaks and other regions of interest:
+simpleCache(paste_("motifs", digest::digest(peaksDt[order(rid),.(rid,chrom,start,end)]), digest::digest(mtfSet)), {
+	names(peaksGr) <- peaksDt$rid
+	mtfs <- motifmatchr::matchMotifs(mtfSet, peaksGr, genome = refGenomeChrom, out="scores") 
+	mtfMat <- as.matrix(motifmatchr::motifCounts(mtfs))
+	mtfMat
+}, assignToVar="mtfMat", reload=TRUE, recreate=FALSE)
+
+
+
+motifPosCache <- paste_("motif_pos", digest::digest(peaksDt[order(rid),.(rid,chrom,start,end)]), digest::digest(mtfSet))
+simpleCache(motifPosCache, {
+
+	names(peaksGr) <- peaksDt$rid
+	mtfs <- motifmatchr::matchMotifs(mtfSet, peaksGr, genome = refGenomeChrom, out="positions")
+	mtfs
+}, assignToVar="motifPos", noload=F, recreate=FALSE)
+
+
+# add motif annotations to all peaks:
+for(x in intersect(colnames(mtfMat),colnames(peaksDt))) peaksDt[,paste(x):=NULL] # remove any pre-existing motif annotations
+peaksDt <- cbind(peaksDt, mtfMat[peaksDt$rid,])
+```
+
+
+# MOTIF COUNT VS CHANGES ####
+
+```{r}
+
+motifSels <- c("EF_vs_Wt_sig_dir"="SPIB|CEBPA|CEBPB|ETV1|TEAD4|MEIS2.var2","module_id"="SPIB|Nr2e3|ZNF148|TEAD4|ETV1") # "EWSR1|KLF15|E2F6|ZNF460"
+motifLabels <- sapply(mtfSet, function(x) {
+	sprintf("%s\n(%s)",x@name, x@ID)
+})
+motifNames <- sapply(mtfSet, function(x) {
+	x@name
+})
+motifsOfInterest <- unique(names(motifLabels)[grepl(paste(motifSels,collapse="|"), motifLabels, ignore.case=T)])
+
+
+```
+
+
+```{r}
+pData <- merge(darRes[cmp%in%gsub("_sig_dir","",names(motifSels)),], peaksDt[, c("rid", motifsOfInterest), with=F], by="rid")
+pData <- melt(pData, measure.vars=motifsOfInterest)
+pData[, motif_id:=as.character(variable), by=variable]
+pData[, motif_label:=motifLabels[motif_id], by=variable]
+ub <- 3
+pData[, capped_motif_count := factor(pmin(ub, value), levels=0:ub, labels=c(0:(ub-1), paste0(">=",ub)))]
+ub <- 10
+pData[, capped_lfc:=ifelse(abs(log2FoldChange)>=ub, sign(log2FoldChange)*ub, log2FoldChange)]
+pData[, n_combo:=.N, by=.(cmp, capped_motif_count, motif_label)]
+
+cols <- pData[,levels(capped_motif_count)]
+cols <- structure(viridis::viridis(length(cols)), names=pData[,levels(capped_motif_count)])
+
+# exclude motifs / count-levels with <=X occrurences (these tend to mess up density plots because they are too unstable):
+p <- ggplot(pData[n_combo>=25,], aes(x=log2FoldChange)) + geom_density(aes(group=capped_motif_count, color=capped_motif_count)) + facet_grid(motif_label~cmp, scales="free") + geom_vline(xintercept=0)  + theme(panel.border=element_rect(colour="black", fill=NA), axis.line=element_blank(), legend.position="bottom") #+ scale_color_manual(values=colorPalettes$motif_count)
+print(p)
+
+for(focusCmp in intersect(pData[,unique(cmp)],names(motifSels))) {
+	
+	pDataSel <- pData[cmp==gsub("_sig_dir","",focusCmp) & n_combo>=25 & grepl(motifSels[focusCmp], motif_label, ignore.case=T),]
+	
+	print(focusCmp)
+	print(pDataSel[,.N,by=.(motif_label, capped_motif_count)])
+
+	p5 <- ggplot(pDataSel, aes(x=log2FoldChange)) + geom_density(aes(group=capped_motif_count, color=capped_motif_count)) + facet_grid(motif_label~., scales="free") + scale_color_manual(values=cols) + theme(panel.border=element_rect(colour="black", fill=NA), axis.line=element_blank(), legend.position="bottom")  #+ geom_vline(xintercept=0) 
+	print(p5)
+}
+```
+
+
+```{r}
+setkey(peaksDt, rid)
+setkey(dA, sample_name)
+
+curN <- "module_id"
+bgName <- "BG"
+
+#curPeaks <- peaksDt[module_id!="" & module_id!="BG", ]
+curPeaks <- peaksDt
+curPeaks[module_id=="", module_id:=bgName]
+mods <- split(curPeaks[, names(mtfSet), with=F], f=as.character(curPeaks$module_id))
+print(names(mods))
+
+# count motif occrurences per module:
+modMtfs <- t(sapply(mods, function(x) colSums(x>0, na.rm=T)))
+
+# calculate percentages:
+modN <- sapply(mods, nrow)
+modMtfsPerc <- apply(modMtfs, 2, function(x) x/as.numeric(modN))
+
+# calculate enrichments using Fisher's test:
+enrichRes <- rblapply(names(which(colSums(modMtfsPerc>=MOTIF_MIN_PERC)>0)), function(mtfId) {
+	# print(mtfId)
+	x <- modMtfs[, mtfId]
+	p <- modMtfsPerc[, mtfId]
+	rblapply(setdiff(rownames(modMtfs),bgName), function(modId) {
+		A <- x[[modId]]
+		B <- sum(x) - A
+		C <- modN[[modId]] - A
+		D <- sum(modN) - A - B - C
+		m <- matrix(c(A,B,C,D), nrow=2, byrow=T)
+		fishRes <- fisher.test(m, alternative="greater")
+		data.table(A=A, B=B, C=C, D=D, est=fishRes$estimate,pval=fishRes$p.value,perc=p[[modId]])
+	}, "module_id") 
+}, "motif_id") 
+	
+# define significant enrichments and labels:
+enrichRes[, padj:=p.adjust(pval)]
+
+enrichRes[, perc_bg:=modMtfsPerc[bgName, motif_id]]
+enrichRes[, log2odds:=log2(perc/perc_bg)]
+	
+enrichRes[, motif_label:=sprintf("%s (%s)", sapply(mtfSet[motif_id], function(x) x@name), motif_id)]
+enrichRes[, sig:=abs(log2odds)>=MOTIF_ENRICH_ODDS & padj<=MOTIF_ENRICH_PADJ]
+print(enrichRes[sig==T,.N,by=module_id])
+
+enrichRes[, database:="JASPAR2022"]
+
+fwrite(enrichRes, resultsDir("motif_res.csv.gz"))
+```
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

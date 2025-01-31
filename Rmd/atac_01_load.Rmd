@@ -1,0 +1,560 @@
+---
+title: 'Data loading' 
+author: 'Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+Load utility scripts, constants, etc. used throughput the project:
+
+```{r, include=FALSE}
+source("R/setup.R")
+
+library(DESeq2)
+library(BiocParallel)
+library(GenomicRanges)
+
+MIN_COUNTS_ATAC <- 10
+MIN_SAMPLES_ATAC <- 3
+P_THRESH_ATAC <- 0.05
+LFC_THRESH_ATAC <- log2(1.5)
+
+grpVar <- "sample_group"	
+cmpGrps <- list(
+	c("EF","Wt"),
+	c("Wt_IGF1","Wt"),
+	c("EF_IGF1","EF")
+)
+names(cmpGrps) <- sapply(cmpGrps, paste, collapse="_vs_")
+```
+
+
+
+# Load gene annotations
+
+```{r load_gene_annot}
+simpleCache(paste_("gene_annot", basename(refGtf)), {
+	geneAnnot <- rtracklayer::import(refGtf)
+	geneAnnot
+}, assignToVar="geneAnnot", recreate = FALSE)
+
+acceptedGeneTypes <- c("protein_coding")
+filtGeneAnnot <-  geneAnnot[geneAnnot$gene_biotype %in% acceptedGeneTypes,]
+GenomeInfoDb::seqlevels(filtGeneAnnot) <- paste0("chr",GenomeInfoDb::seqlevels(filtGeneAnnot))
+
+selGeneAnnot <- filtGeneAnnot[filtGeneAnnot$type=="gene",]
+selTSSAnnot <- dtToGr(as.data.table(selGeneAnnot)[,.(seqnames,start=ifelse(strand=="+",start,end),end=ifelse(strand=="+",start,end), gene_id, gene_biotype, gene_symbol=gene_name, type)], "seqnames", metaCols=c("gene_id","gene_biotype","gene_symbol", "type")) 
+selPromoAnnot <- dtToGr(as.data.table(selGeneAnnot)[,.(seqnames,start=ifelse(strand=="+",start-500,end-500),end=ifelse(strand=="+",start+500,end+500), gene_id, gene_biotype, gene_symbol=gene_name, type)], "seqnames", metaCols=c("gene_id","gene_biotype","gene_symbol", "type")) 
+selExonAnnot <- filtGeneAnnot[filtGeneAnnot$type=="exon",]
+
+
+print(head(selGeneAnnot))
+
+rm(geneAnnot, filtGeneAnnot)
+```
+
+
+
+# Quality control
+
+## Pipeline stats
+
+https://www.encodeproject.org/atac-seq/, https://www.encodeproject.org/data-standards/terms/#library
+for mm10 TSS_score<10 is "concerning"	(this was based on RefSeq, but we use a slightly different reference annotation)
+ 
+```{r}
+# reads statistics output from pipeline scripts:
+pipeStats <- fread(resultsDir(config$project_name, "_atac_stats_summary.tsv"))[,.(sample_name, Raw_reads, Trimmed_reads, Mapped_reads, Aligned_reads, Dedup_aligned_reads, Mitochondrial_reads, Peak_count, NRF, PBC1, PBC2, FRiP)]
+pipeStats[, tss_score := calcTSSscore(sprintf(resultsDir("pipeline/%s/QC_%s/%s_TssEnrichment.txt"), sample_name, refGenomeChrom, sample_name))]
+
+print(pipeStats)
+
+dA <- merge(dA, pipeStats[, .(sample_name, total_size=Aligned_reads, PBC1, PBC2, NRF, FRiP, tss_score)], by = "sample_name", all.x = TRUE)
+dA[, pass_qc:= NRF>=0.5 & PBC1>=0.7 & PBC2>=3 & tss_score>=10]
+
+print(dA[, .(sample_name, NRF, PBC1, PBC2, tss_score, FRiP, pass_qc)])
+```
+
+```{r, fig.height=8}
+alnStats <- rblapplyDT(dA, function(x) {
+	Rsamtools::idxstatsBam(x$reads_file)
+}, "sample_name")
+	
+# alignments per chromosome / scaffold:
+dispChroms <- alnStats[,.(seqnames, rnk=rank(-mapped)), by=sample_name][rnk<=6, unique(seqnames)] # display top chromosome names only
+alnStats[seqnames%in%dispChroms, chrom:=seqnames]
+alnStats[is.na(chrom) & grepl("chr(\\d+|M|X|Y)", seqnames), chrom:="Other 'real' chromosome"]
+alnStats[is.na(chrom), chrom:="Other chrUn | _random"] 
+
+p <- ggplot(alnStats[,.(reads=sum(mapped)), by=.(sample_name, chrom)], aes(x=sample_name, y=reads, fill=chrom)) + scale_fill_manual(values=getColors(alnStats[,unique(chrom)])) + xlab(NULL) + rotateLabels()
+
+print( 
+    (p + geom_bar(stat="identity", position="fill")+ylab("% aligned reads")) / (p + geom_bar(stat="identity", position="stack")+ylab("# aligned reads")) +
+        plot_annotation(title="Top chromosomes / scaffolds", tag_levels = 'A') + 
+        plot_layout(guides = 'collect')
+)
+
+fwrite(alnStats, file=resultsDir("aln_chrom.csv"))
+```
+
+```{r}
+alnPercSummary <- alnStats[, .(perc_x=sum(mapped * as.numeric(seqnames=="chrX"), na.rm=T)/sum(mapped, na.rm=T), perc_y=sum(mapped * as.numeric(seqnames=="chrY"), na.rm=T)/sum(mapped, na.rm=T), perc_weird=sum(mapped * as.numeric(grepl("_",seqnames)), na.rm=T)/sum(mapped, na.rm=T), perc_auto=sum(mapped * as.numeric(!seqnames%in%paste0("chr",c("X","Y","M"))), na.rm=T)/sum(mapped, na.rm=T)), by=sample_name]
+hmData <- dtToDf(alnPercSummary)
+
+pheatmap::pheatmap(hmData, cellheight=14, cellwidth=24, display_numbers=round(hmData,3), number_format="%.3f", scale="column")
+```
+
+
+## Remove low-quality
+
+To be removed:
+
+```{r}
+dA[pass_qc==F,]
+```
+
+
+Remove low-quality samples:
+
+```{r}
+dA <- dA[pass_qc==T,]
+```
+
+
+
+
+# Load peaks
+
+Read peaks:
+
+```{r, fig.height=8, fig.width=6}
+# read in all peaks called in each sample (and throw out those on the mitochondrial and weird parts of the genome):
+umPeaksDt <- rblapply(dA[, peaks_file], fread, "f")[!grepl("_|M",V1)]	
+umPeaks <- with(umPeaksDt, GRanges(V1, IRanges(V2,V3)))
+
+# write / plot peak summary:
+peakNum <- rblapply(dA[, peaks_file], fread, "f")[,.N,by=f]
+fwrite(cbind(dA[,.(sample_name, sample_group)], peakNum)[order(-N),], file=resultsDir("peaks.csv"))
+plotData <- merge(peakNum, dA, by.x="f", by.y="peaks_file")
+p1 <- ggplot(plotData, aes(x=reorder(sample_name,-N), y=N, fill=flowcell)) + geom_bar(stat="identity") + rotateLabels()
+p2 <- ggplot(plotData, aes(x=reorder(sample_name,-N), y=N, fill=sample_group)) + geom_bar(stat="identity") + rotateLabels() + scale_fill_manual(values=colorPalettes$sample_group)
+print(p1 / p2)
+```
+
+Merge overlapping peaks:
+
+```{r}
+peaks <- GenomicRanges::reduce(umPeaks)
+```
+
+Remove blacklisted regions (see https://sites.google.com/site/anshulkundaje/projects/blacklists):
+
+```{r}
+blacklistURL <- sprintf("http://mitra.stanford.edu/kundaje/akundaje/release/blacklists/%s-mouse/%s.blacklist.bed.gz", refGenomeChrom, refGenomeChrom)
+
+blacklist <- with(fread(paste0("wget -O - ",blacklistURL,"| zcat")), GRanges(V1,IRanges(V2,V3)))
+overlapBlacklist <- countOverlaps(peaks, blacklist)>0
+
+peaks <- peaks[!overlapBlacklist]
+```
+
+Annotate each merged peak with the matching source peaks:
+
+```{r, fig.height=6, fig.width=8}
+tmp <- sapply(dA$sample_name, function(s) {
+	(countOverlaps(peaks, umPeaks[umPeaksDt[,f==dA[s,peaks_file]],])>0)*1
+})
+
+fwrite(as.data.table(tmp)[,.N,by=eval(dA$sample_name)][order(-N),], file=resultsDir("peak_overlaps.csv"))
+pData <- as.data.table(tmp)
+setorderv(pData, cols=dA$sample_name)
+setkey(dA, sample_name)
+```
+
+Pack all peak info in a big table:
+
+```{r, fig.height=8, fig.width=6}
+peaksDt <- data.table(chrom=as.character(seqnames(peaks)), start=start(peaks), end=end(peaks), tmp)
+peaksDt[,rid:=paste0("r", 1:nrow(peaksDt))]
+
+hist(peaksDt[,end-start])
+
+plotData <- melt(peaksDt, measure.vars=dA$sample_name)[value==1, .N, by=variable]
+plotData <- cbind(plotData, dA[as.character(plotData$variable),])
+p1 <- ggplot(plotData, aes(x=reorder(sample_name,-N), y=N, fill=flowcell)) + geom_bar(stat="identity") + rotateLabels()
+p2 <- ggplot(plotData, aes(x=reorder(sample_name,-N), y=N, fill=sample_group)) + geom_bar(stat="identity") + rotateLabels() + scale_fill_manual(values=colorPalettes$sample_group)
+
+print(p1 / p2)
+	
+setkey(peaksDt,rid)
+
+print(head(peaksDt))
+```
+
+
+# Count reads overlapping peaks
+
+```{r}
+peaksSAF <- as.data.frame(peaksDt[,.(GeneID=rid, Chr=chrom, Start=start, End=end, Strand="*")])
+fc <- Rsubread::featureCounts(files=dA$reads_file, annot.ext=peaksSAF, isGTFAnnotationFile=FALSE, useMetaFeatures=TRUE, allowMultiOverlap=TRUE, countMultiMappingReads=FALSE, largestOverlap=FALSE, nthreads=32, strandSpecific=0, isPairedEnd=FALSE)
+	
+for(n in c("stat", "counts", "annotation")) {
+  dt <- as.data.table(fc[[n]], keep.rownames=TRUE)
+  print(head(dt))
+  fwrite(dt, file=resultsDir("fc_", n, ".csv.gz"))
+}
+```
+
+```{r, fig.width=7, fig.height=12}
+# feature assignment:	
+pData <- merge(melt(as.data.table(fc$stat), id.vars="Status")[,.(reads_file_basename=variable, status=Status, reads=value)], dA, by="reads_file_basename")
+p <- ggplot(pData[status%in%pData[reads>0,unique(status)],], aes(x=sample_name, y=reads, fill=status)) + rotateLabels() + scale_fill_manual(values=getColors( pData[reads>0,unique(status)])) + xlab(NULL)
+print( (p+geom_bar(stat="identity", position="fill")+ylab("% aligned reads")) / (p+geom_bar(stat="identity", position="stack")+ylab("# aligned reads")) + plot_annotation(title="featureCounts", tag_levels = 'A') +  plot_layout(guides = 'collect'))	
+
+
+# put together stats table:
+fcStats <- dtToDf(fc$stat)
+fcStats <- rbind(fcStats, Assigned_rate=fcStats["Assigned",]/colSums(fcStats))
+fcStats <- melt(as.data.table(fcStats[rowSums(fcStats)>0,],keep.rownames="variable"), variable.name="sample_name")
+fcStats[, sample_name:=gsub("_sort_dedup.bam","",sample_name)]
+
+pipeStats[, Trimmed_rate:=Trimmed_reads/Raw_reads]
+pipeStats[, Aligned_rate:=Aligned_reads/Trimmed_reads]
+pipeStats[, Dedup_aligned_rate:=Dedup_aligned_reads/Aligned_reads]
+pipeStats[, Mito_rate:=Mitochondrial_reads/Aligned_reads]	
+pipeStatsX <- melt(pipeStats, id.vars="sample_name")
+
+fullStats <- merge(dA, dcast(rbind(pipeStatsX, fcStats), sample_name~variable), by="sample_name", all.x=T)
+fullStats[, sample_name:=factor(sample_name, levels=fullStats[order(Peak_count),sample_name])]
+	
+p <- ggplot(melt(fullStats, id.vars=intersect(colnames(fullStats),colnames(dA))), aes(x=sample_name, y=value, fill=sample_group)) + geom_bar(stat="identity") + facet_grid(variable~., scale="free_y") + rotateLabels()
+print(p)
+
+fwrite(fullStats, file=resultsDir("stats.csv"))
+```
+
+
+# Prepare DESeq2 models and normalize data
+
+```{r}
+
+# get counts per peak:
+dCounts <- dtToDf(fread(resultsDir("fc_counts.csv.gz")))
+
+# replace BAM file names with actual sample names used:
+setkey(dA, "reads_file_basename")
+colnames(dCounts) <- dA[colnames(dCounts), sample_name] 
+setkey(dA, "sample_name")	
+		
+# keep only data that passed QC:
+dCounts <- dCounts[, dA[colnames(dCounts), pass_qc]]
+
+# peaks with good coverage only:
+i <- rowSums(dCounts>=MIN_COUNTS_ATAC) >= MIN_SAMPLES_ATAC	
+msgF("loaded counts, using %d out of %d peaks with >=%d reads in at least %d samples", sum(i), length(i), MIN_COUNTS_ATAC, MIN_SAMPLES_ATAC)
+# loaded counts, using 98951 out of 153246 peaks with >=10 reads in at least 3 samples
+
+# define DESeq2 model:
+dCounts <- dCounts[i, ]	
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = dCounts,
+							  colData = dtToDf(dA)[colnames(dCounts),,drop=F],
+							  design = ~ batch + sample_group)
+
+# run the main DESeq workflow:
+dds <- DESeq2::DESeq(dds)
+	
+# do the same again, but split by batch (reuse the size factors calculated above):
+ddsX <- sapply(dA[,unique(batch)], function(b) {		
+	i <- dA[colnames(dCounts), batch==b]
+	ddsX <- DESeq2::DESeqDataSetFromMatrix(countData = dCounts[,i],
+							  colData = dtToDf(dA)[colnames(dCounts)[i],,drop=F],
+							  design = ~ sample_group)
+	sizeFactors(ddsX) <- sizeFactors(dds)[i]
+	ddsX <- DESeq2::DESeq(ddsX)	
+	return(ddsX)
+}, simplify = FALSE)
+
+dds <- list(all=dds, batched=ddsX)
+
+
+
+```
+
+Use DESeq2 to create a normalized counts matrix:
+
+```{r}
+dVst <- assay(vst(dds$all))
+print(head(dVst))
+```
+	
+Remove all peaks that didn't end up being considered for analysis:
+
+```{r}
+peaksDt[, inc:=rid%in%rownames(dVst)]
+peaksDt <- peaksDt[inc==TRUE,]
+		
+pData <- merge(melt(as.data.table(dVst, keep.rownames="rid"), id.vars="rid", variable.name="sample_name"), dA, by="sample_name")
+p <- ggplot(pData, aes(x=sample_name, y=value, color=sample_group)) + geom_boxplot() + rotateLabels() + scale_color_manual(values=colorPalettes$sample_group) + xlab(NULL) + ylab("Norm. read count, log2")
+print(p)
+```
+
+
+
+# Annotate peaks with genes
+
+```{r}
+peaksGr <- dtToGr(peaksDt)
+```
+
+Annotate with nearby genes:
+
+```{r}
+if("gene_dist"%in%colnames(peaksDt)) {
+	peaksDt[, gene_dist:=NULL]
+	peaksDt[, gene_symbol:=NULL]
+}
+
+geneDist <- distanceToNearest(peaksGr, selTSSAnnot, ignore.strand=T)
+
+peaksDt[, gene_dist:=geneDist@elementMetadata$distance]
+peaksDt[, gene_symbol:=selTSSAnnot@elementMetadata$gene_symbol[subjectHits(geneDist)]]
+rm(geneDist)
+
+print(head(peaksDt[ , .(rid, gene_dist, gene_symbol)]))
+```
+
+
+
+# Differential comparisons
+
+```{r}
+# function to run all pairwise comparisons between the selected sample groups:
+runComparisons <- function(dds, grp, grp_var="grp") {
+  msgF("%s vs %s", grp[1], grp[2])
+  cont <- c(grp_var, grp)
+  dt <- as.data.table(results(dds, contrast=cont, lfcThreshold=LFC_THRESH_ATAC, independentFiltering=TRUE, format="DataFrame", tidy=TRUE, alpha=P_THRESH_ATAC))
+		
+  dt[, fg_n:=sum(dds@colData[,grpVar]==grp[1])]
+  dt[, bg_n:=sum(dds@colData[,grpVar]==grp[2])]
+  
+  return(dt)
+}	
+```
+
+Apply to all sample group selections of interest:
+
+```{r}
+res <- rblapply(cmpGrps, runComparisons, "cmp", grp_var=grpVar, dds=dds$all)	
+res <- unique(res)		
+res[,batch:="all"]
+```
+
+Do the same again, but running comparisons only within batch:
+
+```{r}
+# 
+resBatched <- rblapply(names(dds$batched), function(b) {
+	ddsX <- dds$batched[[b]]
+
+	# check with comparisons can be run within the current batch:
+	cmpGrpsBatched <- cmpGrps[sapply(cmpGrps, function(x) {
+		dA[colnames(ddsX),][get(grpVar)%in%x,.N,by=grpVar][,sum(N>=1)] == 2
+	})]
+
+	resTmp <- rblapply(cmpGrpsBatched, runComparisons, "cmp", grp_var=grpVar, dds=ddsX)	
+	resTmp[, cmp:=paste_(cmp, b)]
+	resTmp
+}, "batch")
+```
+
+Combined results:
+
+```{r}
+res <- rbind(res, resBatched)
+
+# some cosmetics:
+res[, rid:=row]
+res[, row:=NULL] 	
+res[, dir:=sign(log2FoldChange)]
+```
+
+Define significant DARs:
+
+```{r}
+res[, sig:=is.finite(padj) & padj<=P_THRESH_ATAC & abs(log2FoldChange)>=LFC_THRESH_ATAC]
+res[, sig_dir:=ifelse(sig, dir, 0)]
+res[, cmp_simple:=gsub(paste0("_",batch,"$",collapse=""),"",cmp),by=.(cmp,batch)]
+
+print(head(res))
+```
+
+```{r}
+print(res[sig==T,length(unique(rid)),by=.(cmp,sig_dir)][order(cmp,sig_dir),])
+```
+
+Annotate peaks with DE results:
+
+```{r}
+for(n in names(cmpGrps)) {
+	tmp <- res[cmp==n, .(rid, log2FoldChange, pvalue, padj, sig_dir)]
+	colnames(tmp)[-1] <- paste_(n, colnames(tmp)[-1])
+	for(cn in intersect(colnames(peaksDt), colnames(tmp)[-1])) peaksDt[, (cn):=NULL]
+	peaksDt <<- merge(peaksDt, tmp, by="rid")
+}
+```
+
+
+```{r}
+for(i in 1:length(cmpGrps)) {
+	n <- names(cmpGrps)[i]
+	colorPalettes[[paste_(n,"sig_dir")]] <- colorPalettes$sig_dir
+	colorPalettes[[n]] <- colorPalettes[[paste_(n,"sig_dir")]]
+	names(colorPalettes[[n]]) <- paste_(n, names(colorPalettes[[n]]))
+}
+```
+
+Plot fold changes:
+
+```{r}
+p1 <- ggplot(res, aes(color=cmp_simple)) + theme(legend.position="bottom") + facet_wrap(~batch)
+p1 <- (p1+geom_density(aes(x=log2FoldChange)) + geom_vline(xintercept=0) + xlim(-10,10)) + (p1+geom_boxplot(aes(x=cmp_simple,y=log2FoldChange)) + xlab(NULL) + coord_flip()) # both as density and as boxplot
+p2 <- ggplot(res, aes(color=batch)) + theme(legend.position="bottom") + facet_wrap(~cmp_simple)
+p2 <- (p2+geom_density(aes(x=log2FoldChange)) + geom_vline(xintercept=0) + xlim(-10,10)) + (p2+geom_boxplot(aes(x=batch,y=log2FoldChange)) + xlab(NULL) + coord_flip()) # both as density and as boxplot
+print(p1/p2)
+```
+
+```{r, fig.width=9, fig.height=9}
+ps <- lapply(res[,unique(cmp_simple)], function(curCmp) {
+	x <- res[cmp==curCmp,]
+	lapply(res[,unique(batch)], function(b) {
+		y <- res[cmp_simple==curCmp & batch==b,]
+		if(nrow(y)==0) return(ggplot())
+		
+		xy <- merge(merge(x,y,by="rid"), peaksDt[,.(rid,gene_symbol)], by="rid")
+				
+		conflictMap <- c("0"="n.s.","-1"="contradicting","1"="sig.")
+		xy[, conflict_status:=conflictMap[as.character(sig_dir.x*sig_dir.y)]] 
+		xy[conflict_status=="n.s." & (sig_dir.x!=0|sig_dir.y!=0), conflict_status:="sig. lost"] 
+		conflictColors <- c("grey","red","blue","orange")
+		names(conflictColors) <- c(conflictMap,"sig. lost")
+				
+		p <- ggplot(xy, aes(x=log2FoldChange.x, y=log2FoldChange.y, color=conflict_status)) + ggrastr::geom_point_rast(alpha=0.5) + geom_point(data=xy[conflict_status!="n.s.",], shape=1, alpha=0.5) + geom_hline(yintercept=0) + geom_vline(xintercept=0) + geom_abline(slope=1,intercept=0,color="green") + xlab(curCmp) + ylab(y[,unique(cmp)]) + scale_color_manual(values=conflictColors) + coord_cartesian(xlim=c(-20,20),ylim=c(-20,20))	
+		
+		p <- p + ggrepel::geom_text_repel(aes(label=gene_symbol), data=xy[conflict_status=="contradicting", ]) #[sample(.N, min(50,.N)),])
+		p <- p + ggrepel::geom_text_repel(aes(label=gene_symbol), data=xy[conflict_status=="sig. lost", ][sample(.N, min(30,.N)),])
+		
+		return(p)
+	})
+})
+print(patchwork::wrap_plots(unlist(ps,recursive=F), ncol=res[,length(unique(cmp_simple))], guides="collect"))
+```
+
+After confirming that comparisons based on either batch are largely consistent with comparison based on the whole dataset, we have more confidence in using the latter:
+
+```{r}
+res <- res[batch=="all",]
+```
+
+
+```{r}
+curDARs <- res[sig==T, unique(rid)]
+selSamples <- dA[order(sample_group), sample_name]
+K <- 5
+
+darHmData <- abscap(dVst[curDARs,selSamples],0.9)
+distMat <- MKmisc::corDist(darHmData)
+distMat[!is.finite(distMat)] <- max(distMat, na.rm=T)
+
+rc <- fastcluster::hclust(distMat, method="complete")
+moduleIdsTmp <- structure(paste0("tmp",cutree(rc, K)),names=rc$labels)
+
+rcSort <- dendsort::dendsort(rc)
+rcSort <- rc
+
+moduleIds <- factor(moduleIdsTmp[rcSort$order], levels=unique(moduleIdsTmp[rcSort$order]), labels=paste0("M",1:K))
+moduleIds <- structure(as.character(moduleIds),names=names(moduleIds))
+peaksDt[, module_id:=moduleIds[rid]]
+```
+
+```{r, fig.width=4, fig.height=3}
+pData <- merge(res, peaksDt, by="rid", allow.cartesian=T)
+for(n in pData[,unique(cmp)]) {
+	msg(n)
+	
+	pDataSel <- pData[cmp==n,]
+	cap <- 10
+	pDataSel[, capped_lfc:=ifelse(abs(log2FoldChange)>=cap, sign(log2FoldChange)*cap, log2FoldChange)]
+	pDataSel[, is_capped:=ifelse(capped_lfc!=log2FoldChange, "capped", "actual value")]
+		
+	p <- ggplot(pDataSel, aes(x=capped_lfc, y=-log10(pvalue), shape=is_capped)) + ggrastr::geom_point_rast(color="black", size=0.25) + geom_point(aes(color=as.factor(sig_dir)), size=0.5, data=pDataSel[sig==T,])   + geom_vline(xintercept=0, linetype="dashed") + scale_shape_manual(values=c("actual value"=16, "capped"=4))+ ggtitle(n) + scale_color_manual(values=colorPalettes$sig_dir)		#+ defTheme(topLegend=T, noLegendTitle=T)
+
+	print(pDataSel[,.N,by=.(sig, sig_dir)])
+	print(p)	
+}
+```
+
+
+```{r}
+regionsOfInterest <- c(
+	sapply(split(res[sig==T, .(l=paste_(cmp,dir), rid)], by="l"), function(x) x$rid),
+	sapply(split(res[sig==T, .(l=cmp, rid)], by="l"), function(x) x$rid),
+	sapply(split(peaksDt[!is.na(module_id),],by="module_id"), function(x) x[,rid])
+	#,sapply(split(peaksDt[!is.na(sector_id),],by="sector_id"), function(x) x[,rid])
+)
+names(regionsOfInterest) <- gsub("^.+\\.","",names(regionsOfInterest))
+
+fit <- (eulerr::euler(regionsOfInterest[c("EF_IGF1_vs_EF","EF_vs_Wt")]))
+plot(fit, quantities = TRUE)
+plot(fit, fill="transparent", quantities = TRUE)
+fit <- (eulerr::euler(regionsOfInterest[c("EF_vs_Wt_1","EF_IGF1_vs_EF_-1","EF_vs_Wt_-1","EF_IGF1_vs_EF_1")]))
+plot(fit, quantities = TRUE, fill=RColorBrewer::brewer.pal(6, "Paired")[c(2,5,6,1)])
+plot(fit, fill="transparent", quantities = TRUE)
+
+setkey(peaksDt, rid)
+```
+
+
+
+
+
+
+
+
+
+# Write outputs
+
+```{r write_outputs}
+fwrite(dA, file=resultsDir("sample_annot.csv"))
+fwrite(as.data.table(peaksDt, keep.rownames=TRUE), file = resultsDir("d_peaks.csv.gz"))
+fwrite(as.data.table(dA, keep.rownames=TRUE), file = resultsDir("d_meta.csv.gz"))
+fwrite(as.data.table(dVst, keep.rownames=TRUE), file = resultsDir("d_vst.csv.gz"))
+fwrite(res, file=resultsDir("dds_res.csv.gz"))
+```
+
+
+
+
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

@@ -13,3 +13,17 @@
 *.Rproj
 .config
 .local
+.cache
+
+.nextflow
+
+_archive
+mnt_out
+mnt_data
+mnt_resources
+
+Thumbs.db
+
+*.pdf
+*.png
+

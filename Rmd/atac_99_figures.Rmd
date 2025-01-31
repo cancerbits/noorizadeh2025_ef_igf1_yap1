@@ -1,0 +1,420 @@
+---
+title: 'Figures' 
+author: 'Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+Load utility scripts, constants, etc. used throughput the project:
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+Load data:
+
+```{r}
+peaksDt <- fread(resultsDir("d_peaks.csv.gz"))
+dA <- fread(resultsDir("d_meta.csv.gz"))
+dVst <- dtToDf(fread(resultsDir("d_vst.csv.gz")))
+darRes <- fread(resultsDir("dds_res.csv.gz"))
+gseaRes <- fread(resultsDir("gsea.csv.gz"))
+selMotifSet <- paste_("agrep", MICROSAT_EF_MOTIF, MICROSAT_REPEATS, MICROSAT_MISMATCHES)
+for(n in gsub(".csv.gz", "", list.files(resultsDir(), pattern="agrep.*.csv.gz"))) {
+  peaksDt[, paste(n) := rid %in% fread(resultsDir(n, ".csv.gz"))$rid]
+}
+setkey(dA, sample_name)
+setkey(peaksDt, rid)
+
+degs <- fread(resultsDir("fig_volcano_hr_ef_data.csv.gz"))
+
+hyperRes <- fread(resultsDir("hyper_res.csv.gz"))
+motifRes <- fread(resultsDir("motif_res.csv.gz"))
+```
+
+
+
+# Volcano plots
+
+```{r, fig.width=4, fig.height=3}
+pData <- merge(darRes, peaksDt, by="rid", allow.cartesian=TRUE)
+
+volcanoPlots <- sapply(pData[,unique(cmp)], function(n) {
+	msg(n)
+	
+	pDataSel <- pData[cmp==n,]
+	cap <- 10
+	pDataSel[, capped_lfc:=ifelse(abs(log2FoldChange)>=cap, sign(log2FoldChange)*cap, log2FoldChange)]
+	pDataSel[, is_capped:=ifelse(capped_lfc!=log2FoldChange, "capped", "actual value")]
+	
+	dirNames <- makeDirNames(pDataSel$sig_dir, n)
+	plotCols <- structure(colorPalettes$sig_dir, names=dirNames$dir_names)
+	pDataSel$sig_dir <- dirNames$replaced
+	
+	p <- ggplot(pDataSel, aes(x=capped_lfc, y=-log10(pvalue))) + ggrastr::geom_point_rast(color="black", size=0.25) + geom_point(aes(color=sig_dir), size=0.5, data=pDataSel[sig==T,]) + scale_color_manual(values=plotCols)  + geom_vline(xintercept=0, linetype="dashed") + theme(legend.position="top", legend.title = element_blank()) + xlab(sprintf("Fold change: log2(%s / %s)", dirNames$grp_names[1], dirNames$grp_names[2])) + ylab("-log10(P-value)") + ggtitle(n) #, shape=is_capped + scale_shape_manual(values=c("actual value"=16, "capped"=4)) 
+
+	fwrite(pDataSel[, .(lfc=round(log2FoldChange,3), capped_lfc=round(capped_lfc,3), pval=round(pvalue,3), sig, sig_dir)], resultsDir("fig_volcano_", n, "_data.csv"))
+	ggsave2(plot=p, resultsDir("fig_volcano_", n, ".pdf"), width=8, height=6, units="cm", dpi=600)
+	
+	print(pDataSel[,.N,by=.(sig, sig_dir)])
+	print(p)
+	
+	return(p)
+}, simplify=FALSE)
+```
+
+# Distance to next gene
+
+```{r, fig.width=6, fig.height=2.5}
+pData <- melt(peaksDt, measure.vars=grep("sig_dir", colnames(peaksDt), value=T))
+
+msgF("EF>WT peaks with dist>10kb = %.1f%%", peaksDt[EF_vs_Wt_sig_dir==1,sum(gene_dist>=10000)/.N * 100]) # % of peaks >10kb
+msgF("EF<WT or EF=WT peaks with dist>10kb = %.1f%%", peaksDt[EF_vs_Wt_sig_dir==-1 | EF_vs_Wt_sig_dir==0,sum(gene_dist>=10000)/.N * 100]) # % of peaks >10kb
+msgF("EF<WT or EF=WTT peaks with dist<10kb = %.1f%%", peaksDt[EF_vs_Wt_sig_dir==-1 | EF_vs_Wt_sig_dir==0,sum(gene_dist<=10000)/.N * 100]) # % of peaks <10kb
+
+logDistBins <- rev(sapply(2:5, function(x) c(10^x + 1, 10^(x+1)), simplify=F))
+logDistBins[[1]][2] <- Inf
+logDistBins[[length(logDistBins)]][1] <- 0
+
+pData[, `Distance to TSS (bp)`:=factor(putInBin(gene_dist, bins=logDistBins), labels=sapply(logDistBins, function(b) sprintf("%s-%s", b[1], b[2])), levels=1:length(logDistBins))]
+
+geneDistPlots <- sapply(as.character(pData[,unique(variable)]), function(n) {
+  pDataSel <- pData[variable==n, ]
+  p <- ggplot(pDataSel, aes(x=factor(value, levels=c(-1,0,1), labels=makeDirNames(pDataSel$value, n)$dir_names), fill=`Distance to TSS (bp)`)) + geom_bar(position="fill")  + scale_fill_manual(values=getColors(levels(pData$`Distance to TSS (bp)`), "Greys")) + xlab(NULL) + ylab("Fraction of all peaks") + coord_flip() + ggtitle("Distance of peaks to closest gene", gsub("_sig_dir", "", n))
+  print(p)
+  
+	fwrite(pDataSel[, .(dir=value, distance_tss=`Distance to TSS (bp)`)], resultsDir("fig_gene_dist_", n, "_data.csv"))
+	ggsave2(plot=p, resultsDir("fig_gene_dist_", n, ".pdf"), width=10, height=6, units="cm", dpi=600)
+	
+	return(p)
+}, simplify=FALSE)
+```
+
+
+# fGSEA plots (microsat repeats)
+
+```{r, fig.width=4, fig.height=3}
+microsatPlots <- sapply(darRes[, unique(cmp)], function(sel_ranks) {
+	rnk <- -with(unique(darRes[cmp==sel_ranks,.(rid, v=get(MICROSAT_RANK_BY))])[order(v), .(rid, v=as.double(v))], structure(v, names=rid))
+
+	selGseaRes <- gseaRes[base_motif==MICROSAT_EF_MOTIF & mm==MICROSAT_MISMATCHES & n_reps==MICROSAT_REPEATS & rank_list==sel_ranks,]
+	
+	p <- plotEnrichmentMod(peaksDt[get(selMotifSet)==T, rid], rnk, rn=sel_ranks, mn=selMotifSet, padj=selGseaRes$padj, nes=selGseaRes$NES, dar_dir=with(darRes[cmp==sel_ranks, .(rid, sig_dir)], structure(sig_dir, names=rid))) 
+	
+	print(p)
+	
+	ggsave2(plot=p, resultsDir("fig_microsat_fgsea_", sel_ranks, ".pdf"), width=10, height=6, units="cm", dpi=600)
+	
+	return(p)
+}, simplify=F)
+```
+
+# Microsat density
+
+```{r, fig.width=4, fig.height=3}
+pData <- merge(darRes, peaksDt, by="rid")
+
+pData <- melt(pData, measure.vars=grep("agrep_[ATGCN]+_\\d+", colnames(peaksDt), value=T))
+pData <- pData[value==T,]
+
+pData[, base_motif:=as.factor(gsub(MICROSAT_REGEX,"\\1", variable)), by=variable]
+pData[, n:=as.numeric(gsub(MICROSAT_REGEX,"\\2",variable)), by=variable]
+pData[, mm:=as.numeric(gsub(MICROSAT_REGEX,"\\3",variable)), by=variable]
+
+ub <- 10
+pData[, capped_lfc:=ifelse(abs(log2FoldChange)>=ub, sign(log2FoldChange)*ub, log2FoldChange)]
+pData[, n_combo:=.N, by=.(cmp, n, mm, base_motif)]
+
+colorPalettes$n_hits <- 3:(MICROSAT_REPEATS+2)
+colorPalettes$n_hits <- structure(viridis::viridis(length(colorPalettes$n_hits)), names=colorPalettes$n_hits)
+	
+microsatDensityPlots <- sapply(pData[,unique(cmp)], function(cur_cmp) {
+  pDataSel <- pData[cmp==cur_cmp & n_combo>=25 & mm==MICROSAT_MISMATCHES,]
+  
+  dirNames <- makeDirNames(pDataSel$sig_dir, cur_cmp)
+  
+	g <- guide_legend(keywidth=0.75, keyheight=0.75, title="Repeats (>=n)", title.theme=element_text(angle=90,hjust=0.5), title.position="left", label.position="right", direction="vertical", ncol=1)
+	p5 <- ggplot(pDataSel, aes(x=log2FoldChange)) + geom_density(fill="lightgrey", color=NA, alpha=1) + geom_density(aes(group=n, color=as.factor(n)), alpha=0.05)  + scale_fill_manual(values=colorPalettes$n_hits, guide=g) + scale_color_manual(values=colorPalettes$n_hits, guide=g) + xlab(sprintf("Fold change: log2(%s / %s)", dirNames$grp_names[1], dirNames$grp_names[2])) + ylab("Kernel density")   + geom_vline(xintercept=0, linetype="dashed") + scale_y_continuous(expand=c(0,0)) + ggtitle("Chromatin accessibility relative to microsatellite density")
+	
+	
+	fwrite(pDataSel[, .(n, log2FoldChange)], resultsDir("fig_microsat_fc_density_", cur_cmp, "_data.csv"))
+	ggsave2(plot=p5, resultsDir("fig_microsat_fc_density_", cur_cmp, ".pdf"), width=10, height=6, units="cm", dpi=600)
+	
+	
+	print(p5)
+}, simplify=FALSE)
+```
+
+# Accessibility vs. expression scatter plots
+
+
+```{r, fig.width=4, fig.height=4}
+
+cap <- 10
+pData <- merge(darRes, peaksDt, by="rid", allow.cartesian=T)
+
+n <- "EF_IGF1_vs_EF"
+pDataSel <- pData[cmp==n,]
+pDataSel[, capped_lfc:=ifelse(abs(log2FoldChange)>=cap, sign(log2FoldChange)*cap, log2FoldChange)]
+pDataSel[, is_capped:=ifelse(capped_lfc!=log2FoldChange, "capped", "actual value")]
+
+selDegs <- degs[,-1]
+
+pDataText <- merge(pDataSel[sig==T & gene_dist<=MAX_DIST_GENE,], selDegs, by.x="gene_symbol", by.y="genename", suffixes=c("","_gex"), allow.cartesian=TRUE)
+pDataText[, avg_log2fc := (log2FoldChange+log2FoldChange_gex)/2]
+pDataText[, score:=-log10(pvalue * pvalue_gex)]		# best consistent rating
+pDataText[, alt_score:=abs(log2FoldChange*log2FoldChange_gex)]	# best rating even if inconsistent
+
+pDataText[, rnk:=rank(rank(-score), ties.method="random"), by=.(sign(log2FoldChange),sign(log2FoldChange_gex))]  #+rank(-alt_score)
+#pDataText[, show:=rank(-score)<=20 | rank(-alt_score)<=10]
+pDataText[, show:=rnk<=ifelse(sign(log2FoldChange)==sign(log2FoldChange_gex), 12, 12), by=.(sign(log2FoldChange),sign(log2FoldChange_gex))]
+
+# pick only the most extreme peak to label, if there are multiple peaks for the same gene:
+pDataText[show==T, show:=(log2FoldChange)==absmax(log2FoldChange), by=.(gene_symbol, sign(log2FoldChange),sign(log2FoldChange_gex))]
+
+px <- ggplot(pDataText, aes(x=log2FoldChange, y=log2FoldChange_gex)) + 
+			geom_point(aes(color=avg_log2fc), alpha=3/4, size=0.5)   #aes(alpha=-gene_dist),  #size=score, 
+
+px <- px + geom_vline(xintercept=0, linetype="dashed") + geom_hline(yintercept=0, linetype="dashed")
+
+
+px <- px + ggrepel::geom_text_repel(aes(label=gene_symbol), size=2.5, segment.alpha=2/3, segment.size=0.35, min.segment.length=0.1, data=pDataText[show==TRUE,]) 
+			
+px <- px + scale_color_gradientn(colors=colorRampPalette(repl(colorPalettes$sig_dir, "0", "yellow", by_name=T))(9), guide=guide_colorbar(barwidth=0.15))
+
+px <- px + xlab(sprintf("ATAC-seq: log2(%s)", gsub("_vs_","/",n))) + ylab(sprintf("RNA-seq: log2(%s)", gsub("_vs_","/",n)))
+
+
+print(px)
+
+fwrite(pDataText[,.(rid, chrom, start, end, gene_symbol, gene_dist, log2FoldChange, pvalue, log2FoldChange_gex, pvalue_gex, rnk, sector=paste_(sign(log2FoldChange),sign(log2FoldChange_gex)))][order(sector,rnk),], resultsDir("fig_atac_rna_scatter_", n, "_data.csv"))
+ggsave2(plot=px, resultsDir("fig_atac_rna_scatter_", n, ".pdf"), width=10, height=10, units="cm", dpi=600)
+
+
+accExprScatterPlots <- px
+```
+
+# Gene-based enrichments
+
+
+```{r, fig.width=12, fig.height=10}
+geneEnrichPlots <- sapply(darRes[,unique(cmp)], function(n) {
+	msg(n)	
+	
+  hyperResCur <- hyperRes[grepl(n,signature_name) & signature_name!=n,]
+  dirNames <- makeDirNames(as.numeric(gsub(paste0(n,"_"), "", hyperResCur$signature_name)), n)
+	hyperResCur[, sig_dir:=dirNames$replaced_nonum]
+  
+	colorPalettes[[n]] <- structure(colorPalettes$sig_dir[c("-1","1")], names=dirNames$dir_names_nonum[c(1,3)])
+	
+	ps <- sapply(hyperResCur[,unique(database)], function(db) {		
+	  p <- plotEnrichmentRes(hyperResCur[database==db,], sort_plot_by="odds", rev_sort=T, top_n=3, term_id_col="term", term_label_col="shortened_label", list_col="sig_dir", padj_col="fdr",color_palettes=colorPalettes, n=n, only_sig=FALSE, multi_layout=FALSE)			
+		return(p$plot ) #+ theme(legend.position="none")
+	}, simplify=FALSE)	
+	
+	ps <- patchwork::wrap_plots(ps, ncol=2)
+	
+	print(ps)
+	
+	fwrite(hyperResCur, resultsDir("fig_gene_enrich_", n, "_data.csv"))
+	ggsave2(plot=ps, resultsDir("fig_gene_enrich_", n, ".pdf"), width=16, height=11, units="cm", dpi=600)
+	
+	
+	return(ps)
+	
+}, simplify=FALSE)
+```
+```{r, fig.width=5, fig.height=6}
+n <- "module_id"
+hyperResCur <- hyperRes[grepl("M.",signature_name) & database=="GO_Biological_Process_2021",]
+
+#colorPalettes[[n]] <- structure(colorPalettes$sig_dir[c("-1","1")], names=dirNames$dir_names_nonum[c(1,3)])
+
+geneEnrichPlotsGO <- plotEnrichmentRes(hyperResCur, sort_plot_by="odds", rev_sort=T, top_n=3, term_id_col="term", term_label_col="shortened_label", list_col="signature_name", padj_col="fdr",color_palettes=colorPalettes, n="module_id", only_sig=FALSE, multi_layout=FALSE)$plot
+
+print(geneEnrichPlotsGO)
+
+fwrite(hyperResCur, resultsDir("fig_gene_enrich_GO_", n, "_data.csv"))
+ggsave2(plot=geneEnrichPlotsGO, resultsDir("fig_gene_enrich_GO_", n, ".pdf"), width=10, height=10, units="cm", dpi=600)
+```
+
+# Motif enrichments
+
+```{r, fig.width=5, fig.height=8}
+n <- "module_id"
+motifResCur <- motifRes
+
+motifEnrichPlots <- plotEnrichmentRes(motifResCur, sort_plot_by="odds", rev_sort=T, top_n=3, term_id_col="motif_id", term_label_col="motif_label", list_col="module_id", always_include=c(), color_palettes=colorPalettes, n="module_id", only_sig=FALSE, multi_layout=FALSE)$plot
+
+print(motifEnrichPlots)
+
+fwrite(motifResCur, resultsDir("fig_motif_enrich_", n, "_data.csv"))
+ggsave2(plot=motifEnrichPlots, resultsDir("fig_motif_enrich_", n, ".pdf"), width=8, height=10, units="cm", dpi=600)
+```
+# Module heatmap
+
+
+```{r}
+focusGenes <- c() #c("Yap1","Klf15","Tead4","Lama5","Ewsr1","Fli1","Pou5f1")
+
+selRegions <- darRes[sig==T, unique(rid)]
+selSamples <- dA[order(factor(sample_group, levels=c("Wt", "Wt_IGF1", "EF", "EF_IGF1", "EF_IGF1_xeno"))), sample_name] # 
+darHmData <- abscap(dVst[selRegions,selSamples],0.9)
+
+distMat <- MKmisc::corDist(darHmData)
+distMat[!is.finite(distMat)] <- max(distMat, na.rm=T)
+
+rc <- fastcluster::hclust(distMat, method="complete")
+
+rcSort <- rc
+
+```
+
+```{r}
+lb <- 5
+motifMax <- paste0("agrep_", MICROSAT_EF_MOTIF, "_", lb:10, "_", MICROSAT_MISMATCHES)
+motifMax <- apply(peaksDt[, motifMax, with=FALSE], 1, function(r) {
+  suppressWarnings(r <- max(which(r)))
+  if(is.finite(r)) return(r + lb - 1)
+  return(0)
+}) 
+peaksDt$ef <- motifMax
+head(motifMax)
+```
+```{r, figh.width=8, fig.height=10}
+colAnnot <- dtToDf(dA[selSamples,c("sample_name", "sample_group"),with=F])
+rowAnnot <- dtToDf(peaksDt[rownames(darHmData), .(rid, module_id, ef)]) 
+
+tmp <- sort(na.omit(unique(rowAnnot$ef)))
+colorPalettes$ef <- structure(RColorBrewer::brewer.pal(length(tmp),"Blues"), names=tmp)
+colorPalettes$ef[1] <- NA
+
+annotCol <- colorPalettes[intersect(c(colnames(rowAnnot),colnames(colAnnot)),names(colorPalettes))]
+
+i <- peaksDt[selRegions, which(gene_symbol%in%focusGenes & tolower(gene_symbol)%in%tolower(degs$external_gene_name) & gene_dist<=MAX_DIST_GENE)]  
+ra <- ComplexHeatmap::rowAnnotation(foo = ComplexHeatmap::anno_mark(at = i, labels = peaksDt[rownames(darHmData),][i, sprintf("%s:%.1fkb", gene_symbol, gene_dist/1000)], labels_gp=grid::gpar(fontsize=6)))
+br <- c(4,7.5)
+hmCol <- viridis::turbo(11)
+
+hm <- ComplexHeatmap::pheatmap(darHmData, 
+                               col=hmCol, 
+                               name="Accessiblity", 
+                               border_color=NA,
+                               column_labels=gsub("_S\\d+$","",colnames(darHmData)),
+                               use_raster=TRUE,
+                               main=sprintf("All DARs (n = %d)", nrow(darHmData)),
+                               cluster_col=FALSE,
+                               cluster_row=rcSort,
+                               column_split=dA[colnames(darHmData), factor(condition, levels=c("Wt", "EF"))],
+                               row_split=length(colorPalettes$module_id),
+                               annotation_colors=annotCol,
+                               annotation_row=rowAnnot,
+                               annotation_col=colAnnot,
+                               row_title="M%s",
+                               right_annotation=ra,
+                               show_rownames=FALSE,
+                               breaks=br) # 
+
+ComplexHeatmap::draw(hm)
+
+
+fwrite(rbind(sample_group=c(rep("", ncol(rowAnnot)), colAnnot$sample_group), cbind(rowAnnot, round(darHmData, 3))), resultsDir("fig_hm_modules_data.csv"))
+
+pdf(resultsDir("fig_hm_modules.pdf"), 5.8, 4.2, bg="white", useDingbats=FALSE)
+ComplexHeatmap::draw(hm)
+dev.off()
+```
+
+# Composite figures
+
+```{r, fig.width=7, fig.height=4.5}
+ps <- patchwork::wrap_plots(volcanoPlots$EF_vs_Wt, geneDistPlots$EF_vs_Wt_sig_dir, microsatPlots$EF_vs_Wt, microsatDensityPlots$EF_vs_Wt, ncol=2)
+print(ps)
+pdf(resultsDir("fig_2abcd.pdf"), 8, 4.5, bg="white", useDingbats=FALSE)
+print(ps)
+dev.off()
+```
+
+```{r, fig.width=7.2, fig.height=3}
+ps <- patchwork::wrap_plots(volcanoPlots$EF_IGF1_vs_EF, microsatPlots$EF_IGF1_vs_EF, ncol=2)
+print(ps)
+pdf(resultsDir("fig_4cd.pdf"), 7, 3, bg="white", useDingbats=FALSE)
+print(ps)
+dev.off()
+```
+
+```{r, fig.width=8, fig.height=9}
+ps <- patchwork::wrap_plots(ggplotify::as.ggplot(hm), accExprScatterPlots, motifEnrichPlots, ncol=2, widths = c(2,2), heights=c(2,3))
+print(ps)
+pdf(resultsDir("fig_5abd.pdf"), 7, 7, bg="white", useDingbats=FALSE)
+print(ps)
+dev.off()
+```
+```{r, fig.width=4, fig.height=4}
+ps <- patchwork::wrap_plots(geneEnrichPlotsGO, ncol=1)
+print(ps)
+pdf(resultsDir("fig_s6b.pdf"), 4, 5, bg="white", useDingbats=FALSE)
+print(ps)
+dev.off()
+```
+
+# Tables
+
+Sample overview:
+
+```{r}
+tbl <- dA[, .(sample_name, sample_group, condition, treatment, read_type, batch, flowcell, total_size, PBC1, PBC2, NRF, FRiP, tss_score)]
+fwrite(tbl, resultsDir("table_samples.csv"))
+print(tbl)
+```
+
+Peaks:
+
+```{r}
+tbl <- peaksDt[, .(rid, chrom, start=sprintf("%d", start), end=sprintf("%d", end), gene_dist, gene_symbol, module_id, microsat_repeats=ef)]
+fwrite(tbl, resultsDir("table_peaks.csv"))
+print(head(tbl))
+```
+
+Differential analysis:
+
+```{r}
+tbl <- merge(darRes[, .(cmp, rid, base_mean=round(baseMean,4), log2fc=round(log2FoldChange,4), lfc_se=round(lfcSE,4), stat=round(stat,4), pvalue=round(pvalue,4), padj=round(padj,4))], peaksDt[, .(rid, gene_symbol)], by="rid")
+fwrite(tbl, resultsDir("table_da_results.csv"))
+print(head(tbl))
+```
+
+
+```{r}
+tbl <- rbind(
+  hyperRes[, .(database, signature_name, label, pval=round(pval,4), fdr=round(fdr,4), perc=round(perc,3), perc_bg=round(perc_bg,3), log2odds=round(log2odds,4))],
+  motifRes[, .(database, signature_name=module_id, label=motif_label, pval=round(pval,4), fdr=round(padj,4), perc=round(perc,3), perc_bg=round(perc_bg,3), log2odds=round(log2odds,4))]
+)
+
+fwrite(tbl, resultsDir("table_enrichments.csv"))
+print(head(tbl))
+```
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

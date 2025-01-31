@@ -1,0 +1,89 @@
+---
+title: 'Unsupervised analysis' 
+author: 'Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+Load utility scripts, constants, etc. used throughput the project:
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+```{r}
+dVst <- dtToDf(fread(resultsDir("d_vst.csv.gz")))
+dA <- fread(resultsDir("d_meta.csv.gz"))
+setkey(dA, sample_name)
+```
+
+# Correlation table
+
+```{r, fig.width=10}
+corTable <- cor(dVst)
+rowAnnot <- colAnnot <- dtToDf(dA[colnames(corTable),.(sample_name, genotype, mouse, sample_group, batch, FRiP)])
+annotCol <- colorPalettes[setdiff(intersect(c(colnames(rowAnnot),colnames(colAnnot)),names(colorPalettes)), "FRiP")]
+ComplexHeatmap::pheatmap(corTable, 
+                         cellwidth=12, 
+                         cellheight=12, 
+                         col=rev(RColorBrewer::brewer.pal(7, "Spectral")), 
+                         border_color="white", 
+                         annotation_row=rowAnnot, 
+                         annotation_col=colAnnot, 
+                         annotation_colors=annotCol) 
+```
+
+# PCA
+
+
+```{r}
+dataSel <- list(
+	"all" = dA[,sample_name]
+)
+
+pcaPlot <- function(pData, n, col_by="sample_group") {
+	p <- ggplot(pData, aes(x=PC1, y=PC2, color=get(col_by))) + ylab(sprintf("Principal component 2 (%.1f%%)", summary(pcaRes)$importance[2,2]*100)) + xlab(sprintf("Principal component 1 (%.1f%%)", summary(pcaRes)$importance[2,1]*100)) + geom_point(aes(shape=mouse)) + ggrepel::geom_text_repel(aes(label=sample_name_short)) + ggtitle(n)
+	if(is.null(names(colorPalettes[[col_by]]))) { 
+		p <- p + scale_color_gradientn(colors=colorPalettes[[col_by]])
+	} else {
+		p <- p+ scale_color_manual(values=colorPalettes[[col_by]])
+	}
+}
+
+for(n in names(dataSel)) {		
+	# run PCA and format results as table combined with sample annotation:
+	pcaRes <- prcomp(t(dVst[,dataSel[[n]]]), scale.=T, center=T)
+	pData <- as.data.table(pcaRes$x, keep.rownames="sample_name") 
+	pData <- merge(pData, dA, by="sample_name")
+	
+	# make the plot:
+	for(colBy in c("sample_group", "flowcell", "genotype", "features", "FRiP")) print(pcaPlot(pData, sprintf("PCA: %s, show: %s\nby %s", n, n, colBy), colBy))
+}
+```
+
+
+
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

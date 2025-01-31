@@ -1,0 +1,328 @@
+---
+title: 'ha/hr-EF vs EF' 
+author: 'Rahil Noorizadeh & Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+library(org.Mm.eg.db)
+library(biomaRt)
+library(RColorBrewer)
+library(pheatmap)
+library(EnhancedVolcano)
+
+P_THRESH <- 0.05
+LFC_THRESH <- log2(2)
+```
+
+# Load data
+
+
+```{r}
+m <- read.csv("metadata/samples_nf_rna.csv", row.names=1)
+rownames(m) <- paste0("X", rownames(m))
+```
+
+```{r}
+d <- read.csv(resultsDir("pipeline/nf-core/rna/star_rsem/rsem.merged.gene_counts.tsv"), row.names=1, sep="\t")[,-1]
+rownames(d) <- gsub("\\.\\d+$", "", rownames(d)) # remove version suffix
+head(d)
+```
+
+```{r}
+m_selected <- m[m$condition%in%c("ha", "hr", "EF"),]
+print(m_selected)
+d <- d[,rownames(m_selected)] 
+print(head(d))
+```
+```{r}
+dds <- DESeqDataSetFromMatrix(countData=data.matrix(round(d)), colData=m_selected,  design=~condition)
+dds <- DESeq(dds)
+```
+
+```{R}
+vst_nhbe <- assay(varianceStabilizingTransformation(dds)) 
+print(head(vst_nhbe))
+```
+
+# Figure 4A left 
+
+
+```{r}
+res1 <- results(dds, contrast = c("condition","ha","EF"))
+#res1 <- lfcShrink(dds,  coef = "condition_ha_vs_EF", res=res1, type = 'apeglm')
+res1$genename <- mapIds(org.Mm.eg.db,
+                        keys=rownames(res1), 
+                        column="SYMBOL",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+res1$ensgene <- rownames(res1)
+print(summary(res1, P_THRESH))
+print(sum(complete.cases(res1)))
+print(head(res1))
+
+res1 <- as.data.table(res1, keep.rownames="ensgene")
+res1[, sig_dir := sign(log2FoldChange)]
+res1[abs(log2FoldChange)<LFC_THRESH | padj>P_THRESH, sig_dir := 0]
+setkey(res1, ensgene)
+
+filter_res1 <- res1[!is.na(padj) & padj<=P_THRESH & abs(log2FoldChange)>=LFC_THRESH,][order(log2FoldChange), ]
+print(head(filter_res1))
+```
+
+```{r, fig.width=4, fig.height=6}
+print(filter_res1[,.N,by=sign(log2FoldChange)])
+
+p1 <- EnhancedVolcano(dtToDf(res1, "ensgene"),
+    lab = res1$genename, title = "ha vs ef", subtitle = NULL,
+    x = 'log2FoldChange', FCcutoff = LFC_THRESH,
+    y = 'padj', pCutoff = P_THRESH, ylab = bquote(~-Log[10] ~ FDR),
+    raster = TRUE)
+
+ggsave2(plot=p1, resultsDir("fig_volcano_ha_ef.pdf"), width=10, height=14, units="cm", dpi=600)
+
+fwrite(res1, resultsDir("fig_volcano_ha_ef_data.csv.gz"))
+
+print(p1)
+```
+
+
+
+# Figure 4A right 
+
+```{r}
+res2 <- results(dds, contrast = c("condition","hr","EF"))
+res2$genename <- mapIds(org.Mm.eg.db,
+                        keys=rownames(res2), 
+                        column="SYMBOL",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+res2$ensgene <- rownames(res2)
+
+print(summary(res2, P_THRESH))
+print(sum(complete.cases(res2)))
+print(head(res2))
+
+res2 <- as.data.table(res2, keep.rownames="ensgene")
+res2[, sig_dir := sign(log2FoldChange)]
+res2[abs(log2FoldChange)<LFC_THRESH | padj>P_THRESH, sig_dir := 0]
+setkey(res2, ensgene)
+
+filter_res2 <- res2[!is.na(padj) & padj<=P_THRESH & abs(log2FoldChange)>=LFC_THRESH,][order(log2FoldChange), ]
+print(head(filter_res2))
+```
+
+```{r, fig.width=4, fig.height=6}
+print(filter_res2[,.N,by=sign(log2FoldChange)])
+
+p2 <- EnhancedVolcano(dtToDf(res2, "ensgene"),
+    lab = res2$genename, title = "hr vs ef", subtitle = NULL,
+    x = 'log2FoldChange', FCcutoff = LFC_THRESH,
+    y = 'padj', pCutoff = P_THRESH, ylab = bquote(~-Log[10] ~ FDR),
+    raster = TRUE)
+
+ggsave2(plot=p2, resultsDir("fig_volcano_hr_ef.pdf"), width=10, height=14, units="cm", dpi=600)
+
+fwrite(res2, resultsDir("fig_volcano_hr_ef_data.csv.gz"))
+
+print(p2)
+```
+
+# Fig 4A
+
+```{r, fig.width=8, fig.height=6}
+print(p1 | p2)
+
+ggsave2(plot=p1|p2, resultsDir("fig_volcano_ha_hr_ef.pdf"), width=20, height=14, units="cm", dpi=600)
+```
+
+
+
+# Figure 4B
+
+```{r, fig.height=8, fig.width=4}
+gene_sets <- c(
+  ha_vs_ef = with(data=filter_res1[!is.na(genename), ], expr=split(as.character(toupper(genename)), sign(log2FoldChange))),
+  hr_vs_ef = with(data=filter_res2[!is.na(genename), ], expr=split(as.character(toupper(genename)), sign(log2FoldChange)))
+)
+names(gene_sets) <- gsub("-1", "DOWN", names(gene_sets))
+names(gene_sets) <- gsub("1", "UP", names(gene_sets))
+
+
+p1 <- ggvenn::ggvenn(gene_sets[c("ha_vs_ef.UP", "hr_vs_ef.UP")], text_size=4, show_percentage=FALSE, set_name_size=4)
+p2 <- ggvenn::ggvenn(gene_sets[c("ha_vs_ef.DOWN", "hr_vs_ef.DOWN")], text_size=4, show_percentage=FALSE, set_name_size=4)
+ggsave2(plot=p1/p2, resultsDir("fig_venn_ef_ha_rf.pdf"), width=10, height=20, units="cm", dpi=600)
+print(p1/p2)
+
+fwrite(rbindlist(lapply(gene_sets, function(x) data.table(gene_symbol=x)), idcol="gene_set"), resultsDir("fig_venn_ef_ha_rf_data.csv.gz"))
+```
+
+
+
+
+# Figure S5
+
+```{r}
+gene_sets_x <- list("overlap.DOWN"=intersect(gene_sets$ha_vs_ef.DOWN, gene_sets$hr_vs_ef.DOWN), "overlap.UP"=intersect(gene_sets$ha_vs_ef.UP, gene_sets$hr_vs_ef.UP))
+```
+
+```{r}
+enrichr_lib <- sapply(c("TF_Perturbations_Followed_by_Expression", "KEGG_2016", "KEGG_2019_Mouse", "KEGG_2019_Human", "KEGG_2021_Human", "ChEA_2015", "ChEA_2022", "MSigDB_Hallmark_2020", "MSigDB_Oncogenic_Signatures", "WikiPathways_2019_Mouse", "WikiPathway_2021_Human"), function(x) canceRbits::cb_enrichr_gsets(file.path(config$resources_root, "genesets", "enrichr_lib_231009", paste0(x, ".tsv"))), simplify=F)
+```
+
+```{r}
+msig <- rbind(msigdbr::msigdbr(category="C2", subcategory="CGP"),  msigdbr::msigdbr(category="H"))
+msig <- split(msig$gene_symbol, msig$gs_name)
+head(sapply(msig, length))
+```
+
+```{r}
+gene_libs <- c(enrichr_lib, list(msigdb_cgp=msig[!grepl("HALLMARK",names(msig))], msigdb_h=msig[grepl("HALLMARK",names(msig))]))
+```
+
+
+```{r}
+hyper_res <- rblapply(names(gene_libs), function(sel_db) {
+  
+  sel_db <- gene_libs[[sel_db]]
+  univ <- intersect(toupper(c(res1$genename,res2$genename)), as.character(unlist(sel_db)))
+  
+  sel_db <- sapply(sel_db, intersect, univ, simplify=FALSE)
+  gene_sets_xx <- sapply(gene_sets_x, intersect, univ, simplify=FALSE)
+  
+  rblapply(names(gene_sets_xx), function(gs) {
+    canceRbits::cb_hyper(gene_sets_xx[[gs]], univ, sel_db, max_size = 1250) %>% arrange(pval)
+  }, "gene_set")
+}, "db")
+
+print(hyper_res[, head(.SD, 3), by=.(gene_set, db)])
+```
+
+```{r, fig.width=12, fig.height=2.5}
+hyper_res[order(-overlap), rnk_p:=1:.N, by=gene_set]
+
+all_ps <- list()
+
+  sel_dbs <- c("TF_Perturbations_Followed_by_Expression","MSigDB_Hallmark_2020","ChEA_2022", "KEGG_2021_Human") #names(gene_libs)
+
+hyper_res[, label_short := gsub("CREEDSID GENE", "", label)]
+
+fwrite(hyper_res[db%in%sel_dbs], resultsDir("hyper_res_ha_hr_ef.csv"))
+
+for(sel_db in sel_dbs) {
+  
+  ps <- lapply(names(gene_sets_x), function(gs) {
+    p <- ggplot(head(hyper_res[db==sel_db & gene_set==gs & fdr<=0.05, ][order(rnk_p),], 10), aes(y=reorder(label_short,pval), x=-log10(fdr))) + geom_bar(stat="identity") + ggtitle(sprintf("%s\n%s", sel_db, gs)) + ylab(NULL)
+    return(p)
+  })
+  
+  all_ps <- c(all_ps, ps)
+  
+  p <- patchwork::wrap_plots(ps, ncol=2)
+  print(p)
+  
+  ggsave2(plot=p, resultsDir("fig_hyper_", sel_db, ".pdf"), width=25, height=5, units="cm", dpi=600)
+  
+}
+
+# sanity check direction:
+hyper_res[label_short=="FLI1 KD HUMAN GSE27524  1596 UP",]
+filter_res1[toupper(genename)=="CCL2",]
+```
+
+```{r, fig.width=12, fig.height=12}
+p <- patchwork::wrap_plots(all_ps, ncol=2)
+ 
+  ggsave2(plot=p, resultsDir("fig_hyper_all.pdf"), width=25, height=20, units="cm", dpi=600)
+  
+print(p)
+```
+
+```{r}
+hyper_res[db=="msigdb_cgp" & grepl("kinsey_", label, ignore.case = T), .(gene_set, label, pval, fdr, rnk_p)]
+hyper_res[db=="msigdb_cgp" & grepl("riggi_", label, ignore.case = T), .(gene_set, label, pval, fdr, rnk_p)]
+```
+
+```{r}
+sel_dbs <- msig[grepl("(kinsey|riggi|hallmark)_", names(msig), ignore.case=TRUE)]
+
+sel_res <- res1
+
+gsea_input <- sel_res[!is.na(genename) & toupper(genename)%in%as.character(unlist(msig)) & is.finite(log2FoldChange) & baseMean!=0, .(sig_dir, genename=toupper(genename), stat)]
+gsea_input <- gsea_input[, .(.N, stat, sig_dir), by=genename][N==1,]
+
+rnk <- with(gsea_input, structure(stat, names=genename)) 
+
+gsea_res <- as.data.table(canceRbits::cb_fgsea(names(rnk), rnk, sel_dbs, max_size=1250))
+
+gsea_res[padj<=0.05,]
+gsea_res[grepl("KINSEY", pathway),]
+
+fwrite(gsea_res, resultsDir("gsea_res_ha_hr_ef.csv"))
+```
+
+```{r}
+for(sel_term in names(sel_dbs)) {
+  pw <- intersect(msig[[sel_term]], names(rnk))
+  p <- plotEnrichmentMod(pw, rnk, rn=sel_term, mn="ha vs ef", nes=gsea_res[pathway==sel_term, NES], padj=gsea_res[pathway==sel_term, padj], dar_dir=with(gsea_input, structure(sig_dir, names=genename))) 
+  ggsave2(plot=p, resultsDir("fig_fgsea_", sel_term, ".pdf"), width=10, height=6, units="cm", dpi=600)
+  print(p)
+}
+```
+
+```{r}
+# sanity check to confirm direction
+sel_term <- "KINSEY_TARGETS_OF_EWSR1_FLII_FUSION_DN"
+pw <- intersect(msig[[sel_term]], names(rnk))
+p <- plotEnrichmentMod(pw, rnk, rn=sel_term, mn="ha vs ef", nes=gsea_res[pathway==sel_term, NES], padj=gsea_res[pathway==sel_term, padj], dar_dir=with(gsea_input, structure(sig_dir, names=genename)), label_gene = "Lama5") 
+print(p)
+```
+
+
+
+```{r}
+myheatcolors2 <- colorRampPalette(colors=c("red","white","blue"))(100)
+
+selected_genes <- sexGenes
+
+data_for_hm <- vst_nhbe[res$ensgene,]
+rownames(data_for_hm) <- res$genename
+i <- tolower(rownames(data_for_hm))%in%selected_genes
+p <- ComplexHeatmap::pheatmap(data_for_hm[i,], display_numbers = T, labels_col=m[colnames(data_for_hm), "sample_label"], fontsize_row=9, scale='none', cluster_cols=F, cluster_rows = F)
+ComplexHeatmap::draw(p)
+
+
+
+```
+
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```

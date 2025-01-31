@@ -1,8 +1,56 @@
-project_name: example_project_name
-project_docker: cancerbits/dockr:example_project_name
-project_root_host: /path/to/project
+project_name: noorizadeh_ef1_msc
+project_docker: cancerbits/dockr:noorizadeh_rstudio
+
+java_home: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/tools/jdk-17.0.5/
+nextflow_home: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/tools/nextflow_all/
+nextflow_temp_dir: /scratch/research/halbritter/${USER}/noorizadeh_ef1_msc/nfcore_tmp/
+nextflow_assets_dir: /home/${USER}/.nextflow/assets/
+nextflow_options: -Xms1g -Xmx4g
+nextflow_cpus: 48
+nextflow_mem: 64.GB
+
+project_root_host: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/users/${USER}/noorizadeh2025_ef_igf1_yap1/
 project_root: /home/rstudio
-data_root_host: /path/to/data/example_project
+data_root_host: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/data/noorizadeh_ef1_msc/
 data_root: /home/rstudio/mnt_data
-out_root_host: /path/to/output/example_project
+resources_root_host: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/resources/
+resources_root: /home/rstudio/mnt_resources
+out_root_host: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/out/noorizadeh_ef1_msc/
 out_root: /home/rstudio/mnt_out
+scratch_root: /scratch/research/halbritter/${USER}/noorizadeh_ef1_msc/
+
+metadata:
+  output_dir: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/out/noorizadeh_ef1_msc/noorizadeh_ef1_msc/
+  results_subdir: pipeline/
+  submission_subdir: submission/
+  pipeline_interfaces: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/users/${USER}/pipes/looper_config.yaml
+
+subprojects:
+  rna:
+    metadata:
+      sample_annotation: samples_rna.csv
+  atac:
+    metadata:
+      sample_annotation: samples_atac.csv
+
+data_sources:
+  BSF: "$DATA/noorizadeh_ef1_msc/{bsf_folder}/{flowcell}_L{lane}/{flowcell}_{lane}#{sample_name}.bam"
+
+implied_attributes:
+  organism:
+    human:
+      genome: "Human_Ensembl98_GRCh38.p13"
+      macs_genome_size: "hs"
+    mouse:
+      genome: "Mouse_Ensembl99_GRCm38.p6"
+      genome_short: "mm10"
+      macs_genome_size: "mm10"
+    mouse_refgenie:
+      genome: "mm10"
+      macs_genome_size: "mm"
+      
+derived_attributes: [read1]
+
+samtools: /home/${USER}/bioinf_isilon/Research/HALBRITTER/Internal/tools/samtools-1.20/samtools
+
+

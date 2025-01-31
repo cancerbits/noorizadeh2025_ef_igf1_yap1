@@ -1,0 +1,106 @@
+---
+title: 'Gene enrichment analysis' 
+author: 'Florian Halbritter'
+date: '`r format(Sys.time(), "%B %d, %Y %H:%M:%S %Z")`'
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    highlight: pygments
+    df_print: paged
+---
+
+# Setup
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/rstudio')
+```
+
+Load utility scripts, constants, etc. used throughput the project:
+
+```{r, include=FALSE}
+source("R/setup.R")
+```
+
+```{r}
+peaksDt <- fread(resultsDir("d_peaks.csv.gz"))
+dVst <- dtToDf(fread(resultsDir("d_vst.csv.gz")))
+dA <- fread(resultsDir("d_meta.csv.gz"))
+darRes <- fread(resultsDir("dds_res.csv.gz"))
+setkey(dA, sample_name)
+setkey(peaksDt, rid)
+```
+
+
+```{r}
+# read list of gene databases to use:
+enrichrDBs <- as.character(read.csv("metadata/enrichr_dbs.csv")[,1]) 
+enrichrDBs <- enrichrDBs[!grepl("#",enrichrDBs)]
+#enrichrDBs <- c("GO_Biological_Process_2021") # DEBUG
+```
+
+
+```{r}
+regionsOfInterest <- c(
+	sapply(split(darRes[sig==T, .(l=paste_(cmp,dir), rid)], by="l"), function(x) x$rid),
+	sapply(split(darRes[sig==T, .(l=cmp, rid)], by="l"), function(x) x$rid),
+	sapply(split(peaksDt[!is.na(module_id),],by="module_id"), function(x) x[,rid])
+)
+names(regionsOfInterest) <- gsub("^.+\\.","",names(regionsOfInterest))
+	
+# get genes associated with each set of regions of interest:
+geneLists <- sapply(regionsOfInterest, function(roi) {
+	peaksDt[roi,][gene_dist<=MAX_DIST_GENE, unique(sort(toupper(gene_symbol)))]
+})
+# define background as all genes associated with at least one peak:
+geneUniv <- peaksDt[gene_dist<=MAX_DIST_GENE,unique(toupper(gene_symbol))]
+```
+
+
+```{r}
+simpleCache(paste_("cb_hyper", digest::digest(list(geneLists,geneUniv)), digest::digest(enrichrDBs), MAX_DIST_GENE), {	
+		hyperRes <- rblapply(enrichrDBs, function(db) {
+		msg(db)
+		
+		# load the pathways:
+		pathways <- hypeR::enrichr_gsets(genesets = db)$reduce(geneUniv)$genesets
+		
+		# run the enrichment test:
+		hyperRes <- rblapply(names(geneLists), function(geneListN) as.data.table(canceRbits::cb_hyper(geneLists[[geneListN]], background = geneUniv, genesets = pathways, collapse=F, verbose=F)), "signature_name", cores=min(32, length(geneLists)))
+		
+		msgF("/ %s done", db)
+		
+		return(hyperRes)	
+	}, "database", cores=1)
+	return(hyperRes)
+}, assignToVar="hyperRes", reload=TRUE, recreate=FALSE)
+
+hyperRes[, perc:=overlap/signature]
+hyperRes[, perc_bg:=geneset/background]
+hyperRes[, log2odds:=log2(perc/perc_bg)]
+hyperRes[, term:=paste_(database,label)]
+hyperRes[, sig:=fdr<=GENE_ENRICH_PADJ & overlap>=GENE_MIN_COUNT & is.finite(log2odds) & is.finite(fdr) & abs(log2odds)>=GENE_ENRICH_ODDS] 
+
+hyperRes[, shortened_label := capFirst(gsub(" polymerase II", "pol2", gsub("(CREEDSID GENE|RNASEQ) ","",label))), by=label]
+```
+
+```{r}
+fwrite(hyperRes, resultsDir("hyper_res.csv.gz"))
+```
+
+
+
+
+
+# Appendix
+
+**Runtime**
+
+`r time_diff(SETUP_TIME)`
+
+**Session Info**
+
+```{r}
+sessionInfo()
+```
