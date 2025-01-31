@@ -4,6 +4,8 @@ Rahil Noorizadeh, et al.
 
 St. Anna Children's Cancer Research Institute (CCRI), Vienna, Austria
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14780468.svg)](https://doi.org/10.5281/zenodo.14780468)
+
 ## Abstract
 
 Ewing sarcoma (EwS) is an aggressive cancer of adolescents in need of effective treatment. Insulin-like growth factor (IGF) 1 is an autocrine growth factor for EwS, but only 10% of patients responded to IGF-1 receptor blockade. Although presumed to originate from mesenchymal progenitors during bone development, targeting of the EwS driver oncogene EWS::FLI1  to the mesenchymal lineage in a mouse model does not result in tumor formation but to skeletal malformations and perinatal death. We report that transient exposure to IGF-1 concentrations mimicking serum levels during puberty reprogrammes limb-derived mesenchymal cells of EWS::FLI1-mutant mice to stable transformation and tumorigenicity. We identify a modular mechanism of IGF-1-driven tumor promotion in the early steps of EwS pathogenesis, in which Yap1 plays a central role. Pharmacologic Yap1/Tead inhibition reverses the transformed phenotype of EWS::FLI1 expressing cells. Our data provide a rationale for combined IGF-1R and YAP/TEAD inhibition in the treatment of EwS patients.
