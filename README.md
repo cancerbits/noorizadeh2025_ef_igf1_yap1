@@ -1,6 +1,6 @@
 # Supplementary code repository for: YAP1 is a key regulator of EWS::FLI1-dependent malignant transformation upon IGF-1 mediated reprogramming of bone mesenchymal stem cells
 
-Rahil Noorizadeh, et al.
+Rahil Noorizadeh, Barbara Sax, Tahereh Javaheri, Branka Radic-Sarika, Valerie Fock, Veveeyan Suresh, Maximilian Kauer, Aleksandr Bykov, Danijela Kurija, Michaela Schlederer, Lukas Kenner, Gerhard Weber, Wolfgang Mikulits, Florian Halbritter, Richard Moriggl, Heinrich Kovar
 
 St. Anna Children's Cancer Research Institute (CCRI), Vienna, Austria
 
@@ -27,6 +27,6 @@ Paths in the `config.yaml` file starting with "/path/to/" will have to be set.
 
 ## Links
 
-**Paper:** Coming soon.
+**Paper:** [10.1016/j.celrep.2025.115381](https://doi.org/10.1016/j.celrep.2025.115381)
 
-**Data (GEO):** https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE269007
+**Data (GEO):** [GSE269007](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE269007)
